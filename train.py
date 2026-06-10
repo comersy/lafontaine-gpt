@@ -24,9 +24,9 @@ from model     import GPT, GPTConfig
 
 # Model
 BLOCK_SIZE  = BLOCK_SIZE   # imported from dataset.py
-N_LAYER     = 2
-N_HEAD      = 2
-N_EMBD      = 64
+N_LAYER     = 4
+N_HEAD      = 4
+N_EMBD      = 128
 DROPOUT     = 0.4
 
 # Training
