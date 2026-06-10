@@ -3,7 +3,7 @@ Training loop for lafontaine-gpt.
 
 Two phases:
     pretrain  — trains on Data - French (Moliere, Bossuet, Corneille, La Bruyere...)
-    finetune  — fine-tunes on Data - Fables starting from a pretrain checkpoint
+    finetune  — fine-tunes on Data - Fables starting from pretrain checkpoint
 
 Usage:
     python train.py --phase pretrain
@@ -18,7 +18,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 
-from tokenizer import BPETokenizer
+from tokenizer import WordTokenizer
 from dataset   import build_loaders, BLOCK_SIZE, BATCH_SIZE
 from model     import GPT, GPTConfig
 
@@ -46,14 +46,14 @@ FINETUNE_CONFIG = {
     "n_layer"    : 4,
     "n_head"     : 4,
     "n_embd"     : 256,
-    "dropout"    : 0.3,   # higher dropout to avoid overfitting on small fables corpus
-    "max_iters"  : 5000,
-    "lr"         : 1e-4,  # lower lr for finetuning
+    "dropout"    : 0.3,
+    "max_iters"  : 2000,
+    "lr"         : 5e-5,
     "min_lr"     : 1e-5,
     "warmup"     : 100,
     "batch_size" : 32,
     "block_size" : BLOCK_SIZE,
-    "eval_every" : 250,
+    "eval_every" : 100,
     "eval_iters" : 50,
     "checkpoint" : "checkpoints/finetune.pt",
     "log_file"   : "finetune_log.json",
@@ -69,7 +69,6 @@ DEVICE = (
 # ── LR schedule ───────────────────────────────────────────────────────────────
 
 def get_lr(it: int, cfg: dict) -> float:
-    """Cosine decay with linear warmup."""
     if it < cfg["warmup"]:
         return cfg["lr"] * it / cfg["warmup"]
     if it > cfg["max_iters"]:
@@ -82,7 +81,7 @@ def get_lr(it: int, cfg: dict) -> float:
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def estimate_loss(model: GPT, train_loader: DataLoader, val_loader: DataLoader, eval_iters: int) -> dict:
+def estimate_loss(model, train_loader, val_loader, eval_iters):
     model.eval()
     losses = {}
     for split, loader in [("train", train_loader), ("val", val_loader)]:
@@ -101,24 +100,20 @@ def estimate_loss(model: GPT, train_loader: DataLoader, val_loader: DataLoader, 
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def train(phase: str) -> None:
-
-    assert phase in ("pretrain", "finetune"), "phase must be 'pretrain' or 'finetune'"
+    assert phase in ("pretrain", "finetune")
     cfg = PRETRAIN_CONFIG if phase == "pretrain" else FINETUNE_CONFIG
 
     os.makedirs("checkpoints", exist_ok=True)
 
-    # ── Tokenizer ─────────────────────────────────────────────────────────────
-    tokenizer = BPETokenizer.load("tokenizer.json")
+    tokenizer = WordTokenizer.load("tokenizer.json")
 
-    # ── Data ──────────────────────────────────────────────────────────────────
     train_loader, val_loader = build_loaders(
-        mode        = phase,
-        tokenizer   = tokenizer,
-        block_size  = cfg["block_size"],
-        batch_size  = cfg["batch_size"],
+        mode       = phase,
+        tokenizer  = tokenizer,
+        block_size = cfg["block_size"],
+        batch_size = cfg["batch_size"],
     )
 
-    # ── Model ─────────────────────────────────────────────────────────────────
     model_cfg = GPTConfig(
         vocab_size = len(tokenizer),
         block_size = cfg["block_size"],
@@ -130,7 +125,6 @@ def train(phase: str) -> None:
 
     model = GPT(model_cfg).to(DEVICE)
 
-    # For finetuning, load pretrain checkpoint
     if phase == "finetune":
         pretrain_path = PRETRAIN_CONFIG["checkpoint"]
         if os.path.exists(pretrain_path):
@@ -140,9 +134,8 @@ def train(phase: str) -> None:
             model.load_state_dict(ckpt["model_state"])
             print(f"  Loaded ===> iter {ckpt['iter']}, val loss {ckpt['val_loss']:.4f}\n")
         else:
-            print(f"Warning: no pretrain checkpoint found at {pretrain_path}, finetuning from scratch.\n")
+            print(f"Warning: no pretrain checkpoint found, finetuning from scratch.\n")
 
-    # Update dropout for finetuning
     for module in model.modules():
         if isinstance(module, torch.nn.Dropout):
             module.p = cfg["dropout"]
@@ -151,7 +144,6 @@ def train(phase: str) -> None:
     print(f"Phase  ===> {phase}")
     print(f"Params ===> {sum(p.numel() for p in model.parameters()):,}\n")
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
     decay_params   = [p for n, p in model.named_parameters() if p.dim() >= 2]
     nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2]
 
@@ -160,21 +152,20 @@ def train(phase: str) -> None:
         {"params": nodecay_params, "weight_decay": 0.0},
     ], lr=cfg["lr"])
 
-    # ── Loop ──────────────────────────────────────────────────────────────────
     best_val_loss = float("inf")
     train_iter    = iter(train_loader)
     t_start       = time.time()
 
     log = {
-        "phase"  : phase,
-        "config" : {**cfg, "vocab_size": len(tokenizer)},
-        "evals"  : [],
+        "phase"         : phase,
+        "config"        : {**cfg, "vocab_size": len(tokenizer)},
+        "evals"         : [],
         "best_val_loss" : None,
         "best_iter"     : None,
         "total_time_sec": None,
     }
 
-    print(f"Starting {phase} for {cfg['max_iters']} iterations\n")
+    print(f"Starting {phase} ===> {cfg['max_iters']} iterations\n")
 
     for it in range(cfg["max_iters"]):
 
@@ -202,8 +193,8 @@ def train(phase: str) -> None:
 
             print(
                 f"[{phase} | iter {it:6d}] "
-                f"train loss: {losses['train']:.4f} ===> "
-                f"val loss: {losses['val']:.4f} ===> "
+                f"train: {losses['train']:.4f} ===> "
+                f"val: {losses['val']:.4f} ===> "
                 f"{elapsed:.0f}s"
             )
 

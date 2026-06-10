@@ -10,26 +10,26 @@ import os
 import argparse
 import torch
 
-from tokenizer import BPETokenizer
+from tokenizer import WordTokenizer
 from model     import GPT, GPTConfig
 
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-CHECKPOINT_PATH = os.path.join("checkpoints", "pretrain.pt")
+CHECKPOINT_PATH = os.path.join("checkpoints", "finetune.pt")
 MAX_NEW_TOKENS  = 300
-TEMPERATURE     = 0.9    # >1 more random, <1 more focused
-TOP_K           = 40     # only sample from the top-k tokens
+TEMPERATURE     = 0.8
+TOP_K           = 30
 
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 
-def load_model(checkpoint_path: str, device: str) -> tuple[GPT, BPETokenizer]:
+def load_model(checkpoint_path: str, device: str) -> tuple[GPT, WordTokenizer]:
     print(f"Loading checkpoint ===> {checkpoint_path}")
     torch.serialization.add_safe_globals([GPTConfig])
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    tokenizer = BPETokenizer.load("tokenizer.json")
+    tokenizer = WordTokenizer.load("tokenizer.json")
 
     config = checkpoint["config"]
     model  = GPT(config).to(device)
@@ -45,20 +45,18 @@ def load_model(checkpoint_path: str, device: str) -> tuple[GPT, BPETokenizer]:
 def generate(
     prompt        : str,
     model         : GPT,
-    tokenizer     : BPETokenizer,
+    tokenizer     : WordTokenizer,
     device        : str,
     max_new_tokens: int   = MAX_NEW_TOKENS,
     temperature   : float = TEMPERATURE,
     top_k         : int   = TOP_K,
 ) -> str:
-    # Encode prompt
     ids = tokenizer.encode(prompt, add_special=False)
     if not ids:
         ids = [tokenizer.bos_id]
 
     idx = torch.tensor([ids], dtype=torch.long, device=device)
 
-    # Generate
     with torch.no_grad():
         output = model.generate(
             idx,
@@ -74,7 +72,7 @@ def generate(
 
 def main():
     parser = argparse.ArgumentParser(description="Generate La Fontaine fables")
-    parser.add_argument("--prompt",      type=str,   default="Le",  help="Text prompt to start generation")
+    parser.add_argument("--prompt",      type=str,   default="Le",           help="Prompt to start generation")
     parser.add_argument("--tokens",      type=int,   default=MAX_NEW_TOKENS, help="Number of tokens to generate")
     parser.add_argument("--temperature", type=float, default=TEMPERATURE,    help="Sampling temperature")
     parser.add_argument("--top_k",       type=int,   default=TOP_K,          help="Top-k sampling")
