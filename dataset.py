@@ -14,6 +14,7 @@ import os
 import glob
 import torch
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 from tokenizer import BPETokenizer
 
@@ -40,11 +41,10 @@ def load_pretrain_corpus() -> str:
             print(f"  Warning: {author_dir} not found, skipping.")
             continue
         files = sorted(glob.glob(os.path.join(author_dir, "*.txt")))
-        for path in files:
+        for path in tqdm(files, desc=f"  Loading {author}", unit="file"):
             with open(path, "r", encoding="utf-8") as f:
                 corpus += f.read() + "\n"
         count += len(files)
-        print(f"  {author} ===> {len(files)} files")
     print(f"Pretrain corpus ===> {count} files, {len(corpus):,} characters")
     return corpus
 
@@ -53,12 +53,26 @@ def load_finetune_corpus() -> str:
     """Loads all La Fontaine fables, wrapping each with <bos>/<eos>."""
     files  = sorted(glob.glob(os.path.join(FABLES_DIR, "**", "*.txt"), recursive=True))
     corpus = ""
-    for path in files:
+    for path in tqdm(files, desc="  Loading fables", unit="file"):
         with open(path, "r", encoding="utf-8") as f:
             text = f.read().strip()
         corpus += f"<bos> {text} <eos>\n"
     print(f"Finetune corpus ===> {len(files)} fables, {len(corpus):,} characters")
     return corpus
+
+
+# ── Encoding ──────────────────────────────────────────────────────────────────
+
+def encode_corpus(corpus: str, tokenizer: BPETokenizer, chunk_size: int = 10000) -> list[int]:
+    """
+    Encodes a large corpus in chunks with a tqdm progress bar.
+    """
+    chunks = [corpus[i:i+chunk_size] for i in range(0, len(corpus), chunk_size)]
+    ids    = []
+    for chunk in tqdm(chunks, desc="  Encoding", unit="chunk"):
+        ids += tokenizer.encode(chunk)
+    print(f"  Encoded ===> {len(ids):,} tokens")
+    return ids
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -67,12 +81,6 @@ class TextDataset(Dataset):
     """
     Generic autoregressive dataset.
     Returns (x, y) pairs where y = x shifted by one token.
-
-    Args:
-        ids        : full list of encoded token ids
-        block_size : sequence length
-        split      : "train" or "val"
-        train_split: fraction of data for training
     """
 
     def __init__(
@@ -89,7 +97,7 @@ class TextDataset(Dataset):
         ids = ids[:split_idx] if split == "train" else ids[split_idx:]
 
         self.ids = torch.tensor(ids, dtype=torch.long)
-        print(f"  {split} split ===> {len(self.ids):,} tokens, {len(self):,} sequences")
+        print(f"  {split} ===> {len(self.ids):,} tokens, {len(self):,} sequences")
 
     def __len__(self) -> int:
         return (len(self.ids) - 1) // self.block_size
@@ -112,25 +120,13 @@ def build_loaders(
 ) -> tuple[DataLoader, DataLoader]:
     """
     Builds train and val DataLoaders for the given mode.
-
-    Args:
-        mode       : "pretrain" or "finetune"
-        tokenizer  : trained BPETokenizer
-        block_size : sequence length
-        batch_size : number of sequences per batch
-        train_split: fraction of data for training
     """
-    assert mode in ("pretrain", "finetune"), "mode must be 'pretrain' or 'finetune'"
+    assert mode in ("pretrain", "finetune")
 
     print(f"\nBuilding {mode} loaders...")
 
-    if mode == "pretrain":
-        corpus = load_pretrain_corpus()
-    else:
-        corpus = load_finetune_corpus()
-
-    ids = tokenizer.encode(corpus)
-    print(f"  Encoded ===> {len(ids):,} tokens")
+    corpus = load_pretrain_corpus() if mode == "pretrain" else load_finetune_corpus()
+    ids    = encode_corpus(corpus, tokenizer)
 
     train_dataset = TextDataset(ids, block_size, split="train", train_split=train_split)
     val_dataset   = TextDataset(ids, block_size, split="val",   train_split=train_split)
