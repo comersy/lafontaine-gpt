@@ -209,7 +209,7 @@ if __name__ == "__main__":
     print(f"Corpus loaded ===> {len(corpus):,} characters, {len(fable_files)} fables\n")
 
     # Train
-    tokenizer = WordTokenizer(min_freq=1)
+    tokenizer = WordTokenizer(min_freq=3)
     tokenizer.train(corpus)
 
     # Test encode / decode
