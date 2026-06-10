@@ -9,6 +9,7 @@ Usage:
 """
 
 import os
+import json
 import math
 import time
 import torch
@@ -48,6 +49,7 @@ MIN_LR          = 3e-5     # minimum learning rate (= 10% of peak)
 # Checkpoints
 CHECKPOINT_DIR  = "checkpoints"
 CHECKPOINT_NAME = "best_model.pt"
+LOG_FILE        = "training_log.json"
 
 # Device
 DEVICE = (
@@ -147,6 +149,26 @@ def train() -> None:
     best_val_loss = float("inf")
     train_iter    = iter(train_loader)
     t0            = time.time()
+    t_start       = time.time()
+
+    # Training log written to disk after every eval
+    log = {
+        "config": {
+            "vocab_size" : len(tokenizer),
+            "block_size" : BLOCK_SIZE,
+            "n_layer"    : N_LAYER,
+            "n_head"     : N_HEAD,
+            "n_embd"     : N_EMBD,
+            "dropout"    : DROPOUT,
+            "max_iters"  : MAX_ITERS,
+            "lr"         : LEARNING_RATE,
+            "batch_size" : BATCH_SIZE,
+        },
+        "evals"          : [],   # one entry per eval step
+        "best_val_loss"  : None,
+        "best_iter"      : None,
+        "total_time_sec" : None,
+    }
 
     print(f"\nStarting training for {MAX_ITERS} iterations\n")
 
@@ -176,24 +198,30 @@ def train() -> None:
 
         optimizer.step()
 
-        # ── Logging ───────────────────────────────────────────────────────────
-        if it % LOG_INTERVAL == 0:
-            dt = time.time() - t0
-            print(f"iter {it:5d} ===> loss {loss.item():.4f} ===> lr {lr:.2e} ===> {dt*1000:.0f}ms")
-            t0 = time.time()
-
         # ── Evaluation + checkpoint ───────────────────────────────────────────
         if it % EVAL_INTERVAL == 0 or it == MAX_ITERS - 1:
             losses = estimate_loss(model, train_loader, val_loader)
+            elapsed = time.time() - t_start
             print(
                 f"\n[Eval iter {it}] "
                 f"train loss: {losses['train']:.4f} ===> "
                 f"val loss: {losses['val']:.4f}\n"
             )
 
+            # Append to log
+            log["evals"].append({
+                "iter"       : it,
+                "train_loss" : round(losses["train"], 4),
+                "val_loss"   : round(losses["val"],   4),
+                "lr"         : round(lr, 6),
+                "elapsed_sec": round(elapsed, 1),
+            })
+
             # Save best model
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
+                log["best_val_loss"] = round(best_val_loss, 4)
+                log["best_iter"]     = it
                 checkpoint = {
                     "model_state": model.state_dict(),
                     "config"     : config,
@@ -205,7 +233,12 @@ def train() -> None:
                 torch.save(checkpoint, path)
                 print(f"  Checkpoint saved ===> {path} ===> val loss: {best_val_loss:.4f}\n")
 
-    print("Training complete.")
+            # Write log to disk after every eval
+            log["total_time_sec"] = round(time.time() - t_start, 1)
+            with open(LOG_FILE, "w") as f:
+                json.dump(log, f, indent=2)
+
+    print(f"Training complete. Log saved ===> {LOG_FILE}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
