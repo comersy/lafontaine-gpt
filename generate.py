@@ -10,13 +10,13 @@ import os
 import argparse
 import torch
 
-from tokenizer import WordTokenizer
+from tokenizer import BPETokenizer
 from model     import GPT, GPTConfig
 
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-CHECKPOINT_PATH = os.path.join("checkpoints", "best_model.pt")
+CHECKPOINT_PATH = os.path.join("checkpoints", "pretrain.pt")
 MAX_NEW_TOKENS  = 300
 TEMPERATURE     = 0.9    # >1 more random, <1 more focused
 TOP_K           = 40     # only sample from the top-k tokens
@@ -24,12 +24,12 @@ TOP_K           = 40     # only sample from the top-k tokens
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 
-def load_model(checkpoint_path: str, device: str) -> tuple[GPT, WordTokenizer]:
+def load_model(checkpoint_path: str, device: str) -> tuple[GPT, BPETokenizer]:
     print(f"Loading checkpoint ===> {checkpoint_path}")
     torch.serialization.add_safe_globals([GPTConfig])
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    tokenizer = WordTokenizer.load("tokenizer.json")
+    tokenizer = BPETokenizer.load("tokenizer.json")
 
     config = checkpoint["config"]
     model  = GPT(config).to(device)
@@ -45,7 +45,7 @@ def load_model(checkpoint_path: str, device: str) -> tuple[GPT, WordTokenizer]:
 def generate(
     prompt        : str,
     model         : GPT,
-    tokenizer     : WordTokenizer,
+    tokenizer     : BPETokenizer,
     device        : str,
     max_new_tokens: int   = MAX_NEW_TOKENS,
     temperature   : float = TEMPERATURE,
