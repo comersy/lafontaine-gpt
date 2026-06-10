@@ -16,7 +16,7 @@ import json
 from collections import defaultdict
 
 # ── Hyperparameter ────────────────────────────────────────────────────────────
-VOCAB_SIZE = 500   # number of tokens in the final vocabulary
+VOCAB_SIZE = 2000   # number of tokens in the final vocabulary
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
