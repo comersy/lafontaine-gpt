@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
-MIN_FREQ   = 3      # ignore words appearing less than N times
+MIN_FREQ   = 5      # ignore words appearing less than N times
 
 FABLES_DIR = "Data - Fables"
 FRENCH_DIR = "Data - French"
