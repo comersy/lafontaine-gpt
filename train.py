@@ -1,7 +1,7 @@
 """
 Training loop for lafontaine-gpt.
 
-Trains the GPT model on La Fontaine fables using the BPE tokenizer
+Trains the GPT model on La Fontaine fables using the Word tokenizer
 and the FablesDataset. Saves checkpoints and logs train/val loss.
 
 Usage:
@@ -15,7 +15,7 @@ import time
 import torch
 from torch.utils.data import DataLoader
 
-from tokenizer import BPETokenizer
+from tokenizer import WordTokenizer
 from dataset   import FablesDataset, build_loaders, BLOCK_SIZE, BATCH_SIZE
 from model     import GPT, GPTConfig
 
@@ -112,7 +112,7 @@ def train() -> None:
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # ── Load tokenizer ────────────────────────────────────────────────────────
-    tokenizer = BPETokenizer.load("tokenizer.json")
+    tokenizer = WordTokenizer.load("tokenizer.json")
 
     # ── Build data loaders ────────────────────────────────────────────────────
     train_loader, val_loader = build_loaders(

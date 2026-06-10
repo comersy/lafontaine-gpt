@@ -1,7 +1,7 @@
 """
 Dataset for lafontaine-gpt.
 
-Loads all fables, encodes them with the BPE tokenizer,
+Loads all fables, encodes them with the Word tokenizer,
 and returns (x, y) pairs for autoregressive training.
 
 Usage:
@@ -19,7 +19,7 @@ import glob
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from tokenizer import BPETokenizer
+from tokenizer import WordTokenizer
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 BLOCK_SIZE = 128   # number of tokens per training sequence
@@ -38,7 +38,7 @@ class FablesDataset(Dataset):
 
     Args:
         data_dir   : root folder containing the fable .txt files
-        tokenizer  : trained BPETokenizer
+        tokenizer  : trained WordTokenizer
         block_size : length of each training sequence
         split      : "train" or "val"
         train_split: fraction of data used for training (default 0.9)
@@ -47,7 +47,7 @@ class FablesDataset(Dataset):
     def __init__(
         self,
         data_dir: str,
-        tokenizer: BPETokenizer,
+        tokenizer: WordTokenizer,
         block_size: int = BLOCK_SIZE,
         split: str = "train",
         train_split: float = TRAIN_SPLIT,
@@ -122,7 +122,7 @@ class FablesDataset(Dataset):
 
 def build_loaders(
     data_dir: str,
-    tokenizer: BPETokenizer,
+    tokenizer: WordTokenizer,
     block_size: int = BLOCK_SIZE,
     batch_size: int = BATCH_SIZE,
     train_split: float = TRAIN_SPLIT,
@@ -132,7 +132,7 @@ def build_loaders(
 
     Args:
         data_dir    : root folder with fable .txt files
-        tokenizer   : trained BPETokenizer
+        tokenizer   : trained WordTokenizer
         block_size  : sequence length
         batch_size  : number of sequences per batch
         train_split : fraction of data for training
@@ -150,7 +150,7 @@ def build_loaders(
 
 if __name__ == "__main__":
     # Load tokenizer
-    tokenizer = BPETokenizer.load("tokenizer.json")
+    tokenizer = WordTokenizer.load("tokenizer.json")
 
     # Build loaders
     train_loader, val_loader = build_loaders(

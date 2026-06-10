@@ -19,14 +19,14 @@ import torch.nn as nn
 from torch.nn import functional as F
 from dataclasses import dataclass
 
-from tokenizer import BPETokenizer
+from tokenizer import WordTokenizer
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class GPTConfig:
-    vocab_size  : int   = 500    # size of the BPE vocabulary
+    vocab_size  : int   = 500    # size of the Word vocabulary
     block_size  : int   = 128    # maximum sequence length (context window)
     n_layer     : int   = 4      # number of transformer blocks
     n_head      : int   = 4      # number of attention heads
@@ -271,7 +271,7 @@ class GPT(nn.Module):
 # ── Quick test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    tokenizer = BPETokenizer.load("tokenizer.json")
+    tokenizer = WordTokenizer.load("tokenizer.json")
 
     config = GPTConfig(
         vocab_size = len(tokenizer),

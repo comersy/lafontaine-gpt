@@ -10,7 +10,7 @@ import os
 import argparse
 import torch
 
-from tokenizer import BPETokenizer
+from tokenizer import WordTokenizer
 from model     import GPT, GPTConfig
 
 
@@ -24,12 +24,12 @@ TOP_K           = 40     # only sample from the top-k tokens
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 
-def load_model(checkpoint_path: str, device: str) -> tuple[GPT, BPETokenizer]:
+def load_model(checkpoint_path: str, device: str) -> tuple[GPT, WordTokenizer]:
     print(f"Loading checkpoint ===> {checkpoint_path}")
     torch.serialization.add_safe_globals([GPTConfig])
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    tokenizer = BPETokenizer.load("tokenizer.json")
+    tokenizer = WordTokenizer.load("tokenizer.json")
 
     config = checkpoint["config"]
     model  = GPT(config).to(device)
@@ -45,7 +45,7 @@ def load_model(checkpoint_path: str, device: str) -> tuple[GPT, BPETokenizer]:
 def generate(
     prompt        : str,
     model         : GPT,
-    tokenizer     : BPETokenizer,
+    tokenizer     : WordTokenizer,
     device        : str,
     max_new_tokens: int   = MAX_NEW_TOKENS,
     temperature   : float = TEMPERATURE,
