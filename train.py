@@ -23,12 +23,11 @@ from model     import GPT, GPTConfig
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 # Model
-VOCAB_SIZE  = 500
 BLOCK_SIZE  = BLOCK_SIZE   # imported from dataset.py
-N_LAYER     = 4
-N_HEAD      = 4
-N_EMBD      = 128
-DROPOUT     = 0.1
+N_LAYER     = 2
+N_HEAD      = 2
+N_EMBD      = 64
+DROPOUT     = 0.4
 
 # Training
 MAX_ITERS       = 5000     # total number of training iterations
