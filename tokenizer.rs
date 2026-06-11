@@ -1,8 +1,10 @@
 // BPE Tokenizer from scratch for lafontaine-gpt
+// Optimized: pair counts updated incrementally instead of recomputed from scratch
+//
 // Compile: rustup run stable-x86_64-pc-windows-gnu rustc -O tokenizer.rs -o tokenizer_train.exe
 // Run:     .\tokenizer_train.exe --vocab_size 32000 --min_freq 2
 
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -10,7 +12,7 @@ use std::time::Instant;
 use std::env;
 
 const DEFAULT_VOCAB_SIZE: usize = 32000;
-const DEFAULT_MIN_FREQ:   usize = 5;
+const DEFAULT_MIN_FREQ:   usize = 2;
 const FABLES_DIR: &str = "Data - Fables";
 const FRENCH_DIR: &str = "Data - French";
 const SPECIAL_TOKENS: [&str; 4] = ["<pad>", "<unk>", "<bos>", "<eos>"];
@@ -23,14 +25,15 @@ fn load_txt_files(dir: &str) -> String {
     let mut corpus = String::new();
     let mut count  = 0;
     if !Path::new(dir).exists() {
-        eprintln!("  Warning: {} not found, skipping.", dir);
+        eprintln!("  Warning: {} not found", dir);
         return corpus;
     }
     visit_dirs(Path::new(dir), &mut |path| {
         if path.extension().and_then(|s| s.to_str()) == Some("txt") {
-            match fs::read_to_string(path) {
-                Ok(content) => { corpus.push_str(&content); corpus.push('\n'); count += 1; }
-                Err(e) => eprintln!("  Warning: could not read {:?}: {}", path, e),
+            if let Ok(content) = fs::read_to_string(path) {
+                corpus.push_str(&content);
+                corpus.push('\n');
+                count += 1;
             }
         }
     });
@@ -61,79 +64,133 @@ fn is_french_char(c: char) -> bool {
         )
 }
 
-fn get_word_freqs(text: &str, min_freq: usize) -> HashMap<Vec<String>, usize> {
+// Word represented as a Vec of symbol ids (faster than strings)
+type SymId = u32;
+type Word  = Vec<SymId>;
+
+struct Vocab {
+    sym_to_id : HashMap<String, SymId>,
+    id_to_sym : Vec<String>,
+}
+
+impl Vocab {
+    fn new() -> Self {
+        Self { sym_to_id: HashMap::new(), id_to_sym: Vec::new() }
+    }
+    fn get_or_insert(&mut self, s: &str) -> SymId {
+        if let Some(&id) = self.sym_to_id.get(s) {
+            return id;
+        }
+        let id = self.id_to_sym.len() as SymId;
+        self.id_to_sym.push(s.to_string());
+        self.sym_to_id.insert(s.to_string(), id);
+        id
+    }
+    fn sym(&self, id: SymId) -> &str {
+        &self.id_to_sym[id as usize]
+    }
+}
+
+
+// ── Step 1: build word frequencies ───────────────────────────────────────────
+
+fn get_word_freqs(text: &str, min_freq: usize, vocab: &mut Vocab) -> Vec<(Word, usize)> {
     print!("  [1/4] Counting word frequencies... ");
     io::stdout().flush().unwrap();
     let t = Instant::now();
 
     let mut raw_freq: HashMap<String, usize> = HashMap::new();
-    let mut current_word = String::new();
-    let total_chars = text.len();
+    let mut cur = String::new();
+    let total = text.len();
     let mut last_pct = 0usize;
 
     for (i, c) in text.chars().enumerate() {
         let lc = c.to_lowercase().next().unwrap_or(c);
         if is_french_char(lc) {
-            current_word.push(lc);
-        } else if !current_word.is_empty() {
-            *raw_freq.entry(current_word.clone()).or_insert(0) += 1;
-            current_word.clear();
+            cur.push(lc);
+        } else if !cur.is_empty() {
+            *raw_freq.entry(cur.clone()).or_insert(0) += 1;
+            cur.clear();
         }
-        let pct = i * 100 / total_chars;
-        if pct >= last_pct + 10 {
-            last_pct = pct;
-            print!("{}%... ", pct);
-            io::stdout().flush().unwrap();
-        }
+        let pct = i * 100 / total;
+        if pct >= last_pct + 10 { last_pct = pct; print!("{}%... ", pct); io::stdout().flush().unwrap(); }
     }
-    if !current_word.is_empty() {
-        *raw_freq.entry(current_word).or_insert(0) += 1;
-    }
+    if !cur.is_empty() { *raw_freq.entry(cur).or_insert(0) += 1; }
     println!("done in {:.1}s ({} unique words)", t.elapsed().as_secs_f64(), raw_freq.len());
 
-    print!("  [2/4] Building character-level vocab (min_freq={})... ", min_freq);
+    print!("  [2/4] Building char-level word list (min_freq={})... ", min_freq);
     io::stdout().flush().unwrap();
     let t = Instant::now();
-    let mut word_freqs: HashMap<Vec<String>, usize> = HashMap::new();
+
+    let word_end_id = vocab.get_or_insert(WORD_END);
+
+    let mut words: Vec<(Word, usize)> = Vec::new();
     for (word, freq) in raw_freq {
         if freq >= min_freq {
-            let mut symbols: Vec<String> = word.chars().map(|c| c.to_string()).collect();
-            symbols.push(WORD_END.to_string());
-            *word_freqs.entry(symbols).or_insert(0) += freq;
+            let mut syms: Word = word.chars().map(|c| vocab.get_or_insert(&c.to_string())).collect();
+            syms.push(word_end_id);
+            words.push((syms, freq));
         }
     }
-    println!("done in {:.1}s ({} words kept)", t.elapsed().as_secs_f64(), word_freqs.len());
-    word_freqs
+    println!("done in {:.1}s ({} words kept)", t.elapsed().as_secs_f64(), words.len());
+    words
 }
 
-fn get_pairs(word_freqs: &HashMap<Vec<String>, usize>) -> HashMap<(String, String), usize> {
-    let mut pairs: HashMap<(String, String), usize> = HashMap::new();
-    for (symbols, freq) in word_freqs {
-        for i in 0..symbols.len().saturating_sub(1) {
-            *pairs.entry((symbols[i].clone(), symbols[i+1].clone())).or_insert(0) += freq;
+
+// ── Step 2: build initial pair counts ────────────────────────────────────────
+
+fn build_pair_counts(words: &[(Word, usize)]) -> HashMap<(SymId, SymId), usize> {
+    let mut pairs: HashMap<(SymId, SymId), usize> = HashMap::new();
+    for (syms, freq) in words {
+        for i in 0..syms.len().saturating_sub(1) {
+            *pairs.entry((syms[i], syms[i+1])).or_insert(0) += freq;
         }
     }
     pairs
 }
 
-fn merge_pair(pair: &(String, String), word_freqs: HashMap<Vec<String>, usize>) -> HashMap<Vec<String>, usize> {
-    let merged = format!("{}{}", pair.0, pair.1);
-    let mut new_word_freqs: HashMap<Vec<String>, usize> = HashMap::new();
-    for (symbols, freq) in word_freqs {
-        let mut new_symbols: Vec<String> = Vec::with_capacity(symbols.len());
+
+// ── Step 3: incremental merge ─────────────────────────────────────────────────
+// Instead of recomputing all pairs, we only update pairs affected by the merge.
+
+fn apply_merge(
+    words       : &mut Vec<(Word, usize)>,
+    pair_counts : &mut HashMap<(SymId, SymId), usize>,
+    best        : (SymId, SymId),
+    new_id      : SymId,
+) {
+    for (syms, freq) in words.iter_mut() {
         let mut i = 0;
-        while i < symbols.len() {
-            if i + 1 < symbols.len() && symbols[i] == pair.0 && symbols[i+1] == pair.1 {
-                new_symbols.push(merged.clone());
-                i += 2;
+        while i < syms.len().saturating_sub(1) {
+            if syms[i] == best.0 && syms[i+1] == best.1 {
+                // Remove old pairs around the merge site
+                if i > 0 {
+                    let cnt = pair_counts.entry((syms[i-1], syms[i])).or_insert(0);
+                    *cnt = cnt.saturating_sub(*freq);
+                }
+                if i + 2 < syms.len() {
+                    let cnt = pair_counts.entry((syms[i+1], syms[i+2])).or_insert(0);
+                    *cnt = cnt.saturating_sub(*freq);
+                }
+
+                // Merge
+                syms[i] = new_id;
+                syms.remove(i + 1);
+
+                // Add new pairs around merge site
+                if i > 0 {
+                    *pair_counts.entry((syms[i-1], new_id)).or_insert(0) += *freq;
+                }
+                if i + 1 < syms.len() {
+                    *pair_counts.entry((new_id, syms[i+1])).or_insert(0) += *freq;
+                }
             } else {
-                new_symbols.push(symbols[i].clone());
                 i += 1;
             }
         }
-        *new_word_freqs.entry(new_symbols).or_insert(0) += freq;
     }
-    new_word_freqs
+    // Remove the merged pair itself
+    pair_counts.remove(&best);
 }
 
 
@@ -142,33 +199,52 @@ fn merge_pair(pair: &(String, String), word_freqs: HashMap<Vec<String>, usize>) 
 fn train_bpe(text: &str, vocab_size: usize, min_freq: usize) -> (Vec<String>, Vec<(String, String)>) {
     println!("\nBPE training ===> target: {} tokens, min_freq: {}", vocab_size, min_freq);
 
-    let mut word_freqs = get_word_freqs(text, min_freq);
+    let mut sym_vocab = Vocab::new();
+    let mut words     = get_word_freqs(text, min_freq, &mut sym_vocab);
 
+    // Base vocab: special tokens + all chars
     print!("  [3/4] Building base vocabulary... ");
     io::stdout().flush().unwrap();
-    let mut base_chars: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for symbols in word_freqs.keys() {
-        for s in symbols { base_chars.insert(s.clone()); }
+
+    let mut base_chars: BTreeSet<String> = BTreeSet::new();
+    for (syms, _) in &words {
+        for &id in syms {
+            base_chars.insert(sym_vocab.sym(id).to_string());
+        }
     }
     let mut vocab_tokens: Vec<String> = SPECIAL_TOKENS.iter().map(|s| s.to_string()).collect();
     vocab_tokens.extend(base_chars.into_iter());
     let n_merges = vocab_size.saturating_sub(vocab_tokens.len());
     println!("{} base tokens ===> {} merges to learn", vocab_tokens.len(), n_merges);
 
-    println!("  [4/4] Learning merges...\n");
+    // Build initial pair counts ONCE
+    print!("  [4/4] Building initial pair counts... ");
+    io::stdout().flush().unwrap();
+    let t = Instant::now();
+    let mut pair_counts = build_pair_counts(&words);
+    println!("done in {:.1}s ({} unique pairs)", t.elapsed().as_secs_f64(), pair_counts.len());
+
+    println!("\n  Learning merges...\n");
     io::stdout().flush().unwrap();
 
     let mut merges: Vec<(String, String)> = Vec::with_capacity(n_merges);
     let t0 = Instant::now();
 
     for i in 0..n_merges {
-        let pairs = get_pairs(&word_freqs);
-        if pairs.is_empty() { println!("No more pairs after {} merges.", i); break; }
+        // Find best pair
+        let best = match pair_counts.iter().max_by_key(|(_, &v)| v) {
+            Some((&k, _)) => k,
+            None => { println!("No more pairs after {} merges.", i); break; }
+        };
 
-        let best = pairs.into_iter().max_by_key(|(_, freq)| *freq).unwrap().0;
-        word_freqs = merge_pair(&best, word_freqs);
-        vocab_tokens.push(format!("{}{}", best.0, best.1));
-        merges.push(best.clone());
+        let merged = format!("{}{}", sym_vocab.sym(best.0), sym_vocab.sym(best.1));
+        let new_id = sym_vocab.get_or_insert(&merged);
+
+        merges.push((sym_vocab.sym(best.0).to_string(), sym_vocab.sym(best.1).to_string()));
+        vocab_tokens.push(merged.clone());
+
+        // Incremental update — no full rescan
+        apply_merge(&mut words, &mut pair_counts, best, new_id);
 
         if (i + 1) % 500 == 0 {
             let elapsed   = t0.elapsed().as_secs_f64();
@@ -178,8 +254,7 @@ fn train_bpe(text: &str, vocab_size: usize, min_freq: usize) -> (Vec<String>, Ve
             let secs      = (remaining % 60.0) as u64;
             println!(
                 "  Merge {:6}/{} ===> {}m{}s remaining ===> \"{}\"",
-                i + 1, n_merges, mins, secs,
-                format!("{}{}", best.0, best.1)
+                i + 1, n_merges, mins, secs, merged
             );
             io::stdout().flush().unwrap();
         }
@@ -210,7 +285,7 @@ fn escape_json(s: &str) -> String {
 }
 
 fn save_tokenizer(vocab_tokens: &[String], merges: &[(String, String)], vocab_size: usize, min_freq: usize, path: &str) {
-    print!("Saving tokenizer ===> {}... ", path);
+    print!("\nSaving tokenizer ===> {}... ", path);
     io::stdout().flush().unwrap();
     let mut json = String::new();
     json.push_str("{\n");
