@@ -2,7 +2,7 @@
 Dataset for lafontaine-gpt.
 
 Two modes:
-    pretrain  — loads Data - French (filtered by PRETRAIN_AUTHORS)
+    pretrain  — loads all of Data - French
     finetune  — loads Data - Fables only
 
 Usage:
@@ -26,25 +26,17 @@ TRAIN_SPLIT  = 0.9
 
 FABLES_DIR   = "Data - Fables"
 FRENCH_DIR   = "Data - French"
-PRETRAIN_AUTHORS = ["Moliere", "Bossuet", "Corneille", "La Bruyere", "Racine"]
 
 
 # ── Corpus loading ────────────────────────────────────────────────────────────
 
 def load_pretrain_corpus() -> str:
+    files  = sorted(glob.glob(os.path.join(FRENCH_DIR, "**", "*.txt"), recursive=True))
     corpus = ""
-    count  = 0
-    for author in PRETRAIN_AUTHORS:
-        author_dir = os.path.join(FRENCH_DIR, author)
-        if not os.path.exists(author_dir):
-            print(f"  Warning: {author_dir} not found, skipping.")
-            continue
-        files = sorted(glob.glob(os.path.join(author_dir, "*.txt")))
-        for path in tqdm(files, desc=f"  Loading {author}", unit="file"):
-            with open(path, "r", encoding="utf-8") as f:
-                corpus += f.read() + "\n"
-        count += len(files)
-    print(f"Pretrain corpus ===> {count} files, {len(corpus):,} characters")
+    for path in tqdm(files, desc="Loading French corpus", unit="file"):
+        with open(path, "r", encoding="utf-8") as f:
+            corpus += f.read() + "\n"
+    print(f"Pretrain corpus ===> {len(files)} files, {len(corpus):,} characters")
     return corpus
 
 
@@ -53,7 +45,7 @@ def load_finetune_corpus(tokenizer: WordTokenizer) -> str:
     corpus = ""
     bos    = tokenizer.BOS_TOKEN
     eos    = tokenizer.EOS_TOKEN
-    for path in tqdm(files, desc="  Loading fables", unit="file"):
+    for path in tqdm(files, desc="Loading fables", unit="file"):
         with open(path, "r", encoding="utf-8") as f:
             text = f.read().strip()
         corpus += f"{bos} {text} {eos}\n"
@@ -66,9 +58,9 @@ def load_finetune_corpus(tokenizer: WordTokenizer) -> str:
 def encode_corpus(corpus: str, tokenizer: WordTokenizer, chunk_size: int = 10000) -> list[int]:
     chunks = [corpus[i:i+chunk_size] for i in range(0, len(corpus), chunk_size)]
     ids    = []
-    for chunk in tqdm(chunks, desc="  Encoding", unit="chunk"):
+    for chunk in tqdm(chunks, desc="Encoding", unit="chunk"):
         ids += tokenizer.encode(chunk)
-    print(f"  Encoded ===> {len(ids):,} tokens")
+    print(f"Encoded ===> {len(ids):,} tokens")
     return ids
 
 

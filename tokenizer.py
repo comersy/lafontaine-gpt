@@ -24,11 +24,10 @@ from tqdm import tqdm
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
-MIN_FREQ   = 5      # ignore words appearing less than N times
+MIN_FREQ   = 5
 
 FABLES_DIR = "Data - Fables"
 FRENCH_DIR = "Data - French"
-PRETRAIN_AUTHORS = ["Moliere", "Bossuet", "Corneille", "La Bruyere", "Racine"]
 
 
 # ── Corpus loading ────────────────────────────────────────────────────────────
@@ -44,17 +43,11 @@ def load_corpus(include_fables: bool = True, include_french: bool = True) -> str
         print(f"Fables ===> {len(files)} files")
 
     if include_french:
-        count = 0
-        for author in PRETRAIN_AUTHORS:
-            author_dir = os.path.join(FRENCH_DIR, author)
-            if not os.path.exists(author_dir):
-                continue
-            files = sorted(glob.glob(os.path.join(author_dir, "*.txt")))
-            for path in tqdm(files, desc=f"Loading {author}", unit="file"):
-                with open(path, "r", encoding="utf-8") as f:
-                    corpus += f.read() + "\n"
-            count += len(files)
-        print(f"French corpus ===> {count} files")
+        files = sorted(glob.glob(os.path.join(FRENCH_DIR, "**", "*.txt"), recursive=True))
+        for path in tqdm(files, desc="Loading French corpus", unit="file"):
+            with open(path, "r", encoding="utf-8") as f:
+                corpus += f.read() + "\n"
+        print(f"French corpus ===> {len(files)} files")
 
     print(f"Total ===> {len(corpus):,} characters\n")
     return corpus
