@@ -4,3 +4,4 @@ checkpoints/
 training_log.json
 pretrain_log.json
 finetune_log.json
+Data - French/Wikipedia/wikipedia_fr.txt
