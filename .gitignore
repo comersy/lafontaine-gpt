@@ -9,3 +9,4 @@ Data - French/Wikipedia/wikipedia_fr.txt
 *.rcgu.o
 *.d
 *.exe
+*.bin
