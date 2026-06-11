@@ -2,7 +2,7 @@
 Training loop for lafontaine-gpt.
 
 Two phases:
-    pretrain  — trains on Data - French (Moliere, Bossuet, Corneille, La Bruyere...)
+    pretrain  — trains on Data - French (Wikipedia + classical authors)
     finetune  — fine-tunes on Data - Fables starting from pretrain checkpoint
 
 Usage:
@@ -18,7 +18,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 
-from tokenizer import WordTokenizer
+from tokenizer import BPETokenizer
 from dataset   import build_loaders, BLOCK_SIZE, BATCH_SIZE
 from model     import GPT, GPTConfig
 
@@ -26,31 +26,31 @@ from model     import GPT, GPTConfig
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 PRETRAIN_CONFIG = {
-    "n_layer"    : 4,
-    "n_head"     : 4,
-    "n_embd"     : 256,
+    "n_layer"    : 6,
+    "n_head"     : 6,
+    "n_embd"     : 384,
     "dropout"    : 0.1,
-    "max_iters"  : 20000,
+    "max_iters"  : 50000,
     "lr"         : 3e-4,
     "min_lr"     : 3e-5,
-    "warmup"     : 500,
+    "warmup"     : 2000,
     "batch_size" : 32,
     "block_size" : BLOCK_SIZE,
-    "eval_every" : 500,
+    "eval_every" : 1000,
     "eval_iters" : 50,
     "checkpoint" : "checkpoints/pretrain.pt",
     "log_file"   : "pretrain_log.json",
 }
 
 FINETUNE_CONFIG = {
-    "n_layer"    : 4,
-    "n_head"     : 4,
-    "n_embd"     : 256,
+    "n_layer"    : 6,
+    "n_head"     : 6,
+    "n_embd"     : 384,
     "dropout"    : 0.3,
-    "max_iters"  : 2000,
+    "max_iters"  : 3000,
     "lr"         : 5e-5,
     "min_lr"     : 1e-5,
-    "warmup"     : 100,
+    "warmup"     : 200,
     "batch_size" : 32,
     "block_size" : BLOCK_SIZE,
     "eval_every" : 100,
@@ -68,7 +68,7 @@ DEVICE = (
 
 # ── LR schedule ───────────────────────────────────────────────────────────────
 
-def get_lr(it: int, cfg: dict) -> float:
+def get_lr(it, cfg):
     if it < cfg["warmup"]:
         return cfg["lr"] * it / cfg["warmup"]
     if it > cfg["max_iters"]:
@@ -99,13 +99,13 @@ def estimate_loss(model, train_loader, val_loader, eval_iters):
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
-def train(phase: str) -> None:
+def train(phase):
     assert phase in ("pretrain", "finetune")
     cfg = PRETRAIN_CONFIG if phase == "pretrain" else FINETUNE_CONFIG
 
     os.makedirs("checkpoints", exist_ok=True)
 
-    tokenizer = WordTokenizer.load("tokenizer.json")
+    tokenizer = BPETokenizer.load("tokenizer.json")
 
     train_loader, val_loader = build_loaders(
         mode       = phase,
