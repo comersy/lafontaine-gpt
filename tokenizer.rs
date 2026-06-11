@@ -253,8 +253,9 @@ fn train(vocab_size: usize, min_freq: usize) {
 // ── ══════════════════════════════════════════════════════════════════════════ ──
 
 struct BPEEncoder {
-    vocab    : HashMap<String, u16>,
-    merges   : Vec<(String, String)>,
+    vocab      : HashMap<String, u16>,
+    merges     : Vec<(String, String)>,
+    word_cache : std::cell::RefCell<HashMap<String, Vec<u16>>>,
 }
 
 impl BPEEncoder {
@@ -297,10 +298,10 @@ impl BPEEncoder {
         }
 
         println!("Tokenizer loaded ===> {} tokens, {} merges", vocab.len(), merges.len());
-        Self { vocab, merges }
+        Self { vocab, merges, word_cache: std::cell::RefCell::new(HashMap::new()) }
     }
 
-    fn tokenize_word(&self, word: &str) -> Vec<String> {
+    fn tokenize_word_raw(&self, word: &str) -> Vec<u16> {
         let mut symbols: Vec<String> = word.chars().map(|c| c.to_string()).collect();
         symbols.push(WORD_END.to_string());
 
@@ -318,7 +319,20 @@ impl BPEEncoder {
             }
             symbols = new_syms;
         }
-        symbols
+        symbols.iter().map(|s| *self.vocab.get(s).unwrap_or(&UNK_ID)).collect()
+    }
+
+    // Cache: each unique word is encoded only once
+    fn tokenize_word(&self, word: &str) -> Vec<u16> {
+        {
+            let cache = self.word_cache.borrow();
+            if let Some(ids) = cache.get(word) {
+                return ids.clone();
+            }
+        }
+        let ids = self.tokenize_word_raw(word);
+        self.word_cache.borrow_mut().insert(word.to_string(), ids.clone());
+        ids
     }
 
     fn encode_text(&self, text: &str, add_bos_eos: bool) -> Vec<u16> {
@@ -326,32 +340,24 @@ impl BPEEncoder {
         if add_bos_eos { ids.push(BOS_ID); }
 
         let mut cur_word = String::new();
-        let chars: Vec<char> = text.chars().collect();
-        let mut i = 0;
 
-        while i < chars.len() {
-            let lc = chars[i].to_lowercase().next().unwrap_or(chars[i]);
+        for c in text.chars() {
+            let lc = c.to_lowercase().next().unwrap_or(c);
             if is_french_char(lc) {
                 cur_word.push(lc);
             } else {
                 if !cur_word.is_empty() {
-                    for tok in self.tokenize_word(&cur_word) {
-                        ids.push(*self.vocab.get(&tok).unwrap_or(&UNK_ID));
-                    }
+                    ids.extend(self.tokenize_word(&cur_word));
                     cur_word.clear();
                 }
-                // Punctuation as single token
-                let punct = chars[i].to_string();
-                if !chars[i].is_whitespace() {
+                if !c.is_whitespace() {
+                    let punct = c.to_string();
                     ids.push(*self.vocab.get(&punct).unwrap_or(&UNK_ID));
                 }
             }
-            i += 1;
         }
         if !cur_word.is_empty() {
-            for tok in self.tokenize_word(&cur_word) {
-                ids.push(*self.vocab.get(&tok).unwrap_or(&UNK_ID));
-            }
+            ids.extend(self.tokenize_word(&cur_word));
         }
 
         if add_bos_eos { ids.push(EOS_ID); }
@@ -368,14 +374,7 @@ fn encode(mode: &str, output: &str) {
         _ => panic!("mode must be pretrain or finetune"),
     };
 
-    println!("\nEncoding {} corpus ===> {}", mode, output);
-    let t0 = Instant::now();
-
-    let out_file = fs::File::create(output).expect("Cannot create output file");
-    let mut writer = BufWriter::new(out_file);
-    let mut total_tokens: u64 = 0;
-    let mut file_count  = 0;
-
+    // Load all files and compute total size for char-level progress
     let mut all_files: Vec<_> = Vec::new();
     visit_dirs(Path::new(dir), &mut |path| {
         if path.extension().and_then(|s| s.to_str()) == Some("txt") {
@@ -384,37 +383,58 @@ fn encode(mode: &str, output: &str) {
     });
     all_files.sort();
 
-    let n_files = all_files.len();
+    let total_bytes: u64 = all_files.iter()
+        .map(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    println!("\nEncoding {} corpus ===> {} ({} files, {:.1} GB)",
+        mode, output, all_files.len(), total_bytes as f64 / 1e9);
+    let t0 = Instant::now();
+
+    let out_file = fs::File::create(output).expect("Cannot create output file");
+    let mut writer      = BufWriter::new(out_file);
+    let mut total_tokens: u64 = 0;
+    let mut bytes_done  : u64 = 0;
+    let mut last_pct    : u64 = 0;
+
     for path in &all_files {
         let text = match fs::read_to_string(path) {
             Ok(t) => t,
-            Err(e) => { eprintln!("Warning: {:?}: {}", path, e); continue; }
+            Err(e) => { eprintln!("\nWarning: {:?}: {}", path, e); continue; }
         };
 
+        let file_bytes = text.len() as u64;
         let ids = encoder.encode_text(&text, add_bos_eos);
         for id in &ids {
             writer.write_all(&id.to_le_bytes()).unwrap();
         }
         total_tokens += ids.len() as u64;
-        file_count   += 1;
+        bytes_done   += file_bytes;
 
-        if file_count % 5 == 0 || file_count == n_files {
-            let pct = file_count * 100 / n_files;
-            let elapsed = t0.elapsed().as_secs_f64();
-            let remaining = if file_count > 0 {
-                elapsed / file_count as f64 * (n_files - file_count) as f64
+        let pct = bytes_done * 100 / total_bytes.max(1);
+        if pct >= last_pct + 1 {
+            last_pct  = pct;
+            let elapsed   = t0.elapsed().as_secs_f64();
+            let remaining = if bytes_done > 0 {
+                elapsed / bytes_done as f64 * (total_bytes - bytes_done) as f64
             } else { 0.0 };
-            print!("\r  [{:3}%] {}/{} files ===> {}M tokens ===> {}m{}s remaining   ",
-                pct, file_count, n_files,
+            let cache_size = encoder.word_cache.borrow().len();
+            print!("\r  [{:3}%] {:.2}/{:.2} GB ===> {}M tokens ===> {}m{}s remaining ===> {} words cached   ",
+                pct,
+                bytes_done as f64 / 1e9,
+                total_bytes as f64 / 1e9,
                 total_tokens / 1_000_000,
                 (remaining / 60.0) as u64,
                 (remaining % 60.0) as u64,
+                cache_size,
             );
             io::stdout().flush().unwrap();
         }
     }
 
-    println!("\nEncoding done ===> {} tokens in {:.1}s ===> {}", total_tokens, t0.elapsed().as_secs_f64(), output);
+    println!("\nEncoding done ===> {}M tokens in {:.1}s ===> {}",
+        total_tokens / 1_000_000, t0.elapsed().as_secs_f64(), output);
+    println!("Word cache ===> {} unique words encoded", encoder.word_cache.borrow().len());
 }
 
 
