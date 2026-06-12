@@ -186,8 +186,16 @@ class BPETokenizer:
     def decode(self, ids: list[int]) -> str:
         tokens = [self.vocab_inv.get(i, self.UNK_TOKEN) for i in ids]
         tokens = [t for t in tokens if t not in self.SPECIAL_TOKENS]
-        text   = " ".join(tokens)
-        text   = text.replace(" " + self.WORD_END, " ").replace(self.WORD_END, "")
+
+        text = ""
+        for tok in tokens:
+            if tok.endswith(self.WORD_END):
+                # Word-final token: append word (without </w>) then a space
+                text += tok[:-len(self.WORD_END)] + " "
+            else:
+                # Sub-word token: append directly, no space
+                text += tok
+
         return text.strip()
 
     # ── Save / Load ───────────────────────────────────────────────────────────
@@ -228,3 +236,23 @@ class BPETokenizer:
     def __repr__(self) -> str: return f"BPETokenizer(vocab_size={self.vocab_size}, merges={len(self.merges)})"
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--vocab_size", type=int, default=VOCAB_SIZE)
+    parser.add_argument("--min_freq",   type=int, default=MIN_FREQ)
+    args = parser.parse_args()
+
+    corpus    = load_corpus(include_fables=True, include_french=True)
+    tokenizer = BPETokenizer(vocab_size=args.vocab_size, min_freq=args.min_freq)
+    tokenizer.train(corpus)
+
+    sample  = "Le corbeau et le renard"
+    ids     = tokenizer.encode(sample, add_special=True)
+    decoded = tokenizer.decode(ids)
+    print(f"Original : {sample!r}")
+    print(f"Encoded  : {ids}")
+    print(f"Decoded  : {decoded!r}\n")
+
+    tokenizer.save("tokenizer.json")
