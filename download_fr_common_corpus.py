@@ -8,8 +8,8 @@ output_file = "Data - French/CommonCorpus/common_corpus_fr.txt"
 total = 0
 
 # Télécharge et filtre les premiers shards
-for i in range(1, 6):  # common_corpus_1 à common_corpus_5
-    for j in range(1, 4):  # subset_10_1 à subset_10_3
+for i in range(1, 11): # common_corpus_1 à common_corpus_10
+    for j in range(1, 10): # subbset_10_1 à subset_10_10
         try:
             path = hf_hub_download(
                 repo_id="PleIAs/common_corpus",
