@@ -10,7 +10,7 @@
 //         .\target\release\tokenizer_train.exe encode --mode pretrain --output pretrain_ids.bin
 //         .\target\release\tokenizer_train.exe encode --mode finetune --output finetune_ids.bin
 
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, Write, BufWriter};
 use std::path::{Path, PathBuf};
@@ -125,7 +125,6 @@ fn get_word_freqs(text: &str, min_freq: usize, vocab: &mut SymVocab) -> Vec<(Vec
     let n_threads  = rayon::current_num_threads();
     let chunk_size = (text.len() / n_threads).max(1);
 
-    // Split text into chunks at whitespace boundaries
     let mut chunks: Vec<&str> = Vec::new();
     let mut start = 0;
     while start < text.len() {
@@ -137,7 +136,6 @@ fn get_word_freqs(text: &str, min_freq: usize, vocab: &mut SymVocab) -> Vec<(Vec
         start = end;
     }
 
-    // Each thread counts its own chunk
     let partial_freqs: Vec<HashMap<String, usize>> = chunks
         .par_iter()
         .map(|chunk| {
@@ -159,7 +157,6 @@ fn get_word_freqs(text: &str, min_freq: usize, vocab: &mut SymVocab) -> Vec<(Vec
         })
         .collect();
 
-    // Merge all partial frequency maps
     let mut raw_freq: HashMap<String, usize> = HashMap::new();
     for partial in partial_freqs {
         for (word, freq) in partial {
@@ -207,13 +204,12 @@ fn train(vocab_size: usize, min_freq: usize) {
     let n_merges = vocab_size.saturating_sub(vocab_tokens.len());
     println!("{} base tokens ===> {} merges to learn", vocab_tokens.len(), n_merges);
 
-    // Build pair counts + inverted index simultaneously
     print!("  [4/4] Building pair counts + inverted index... ");
     io::stdout().flush().unwrap();
     let t = Instant::now();
 
     let mut pair_counts: HashMap<(SymId, SymId), usize> = HashMap::new();
-    let mut inverted_index: HashMap<(SymId, SymId), std::collections::HashSet<usize>> = HashMap::new();
+    let mut inverted_index: HashMap<(SymId, SymId), HashSet<usize>> = HashMap::new();
 
     for (word_idx, (syms, freq)) in words.iter().enumerate() {
         for i in 0..syms.len().saturating_sub(1) {
@@ -224,7 +220,6 @@ fn train(vocab_size: usize, min_freq: usize) {
     }
     println!("done in {:.1}s ({} unique pairs)\n", t.elapsed().as_secs_f64(), pair_counts.len());
 
-    // Build lazy BinaryHeap
     use std::collections::BinaryHeap;
     let mut heap: BinaryHeap<(usize, (SymId, SymId))> = BinaryHeap::with_capacity(pair_counts.len());
     for (&pair, &count) in &pair_counts {
@@ -236,7 +231,6 @@ fn train(vocab_size: usize, min_freq: usize) {
     let t0 = Instant::now();
 
     for i in 0..n_merges {
-        // Find best pair via lazy heap
         let best_pair = loop {
             match heap.pop() {
                 None => break None,
@@ -259,11 +253,11 @@ fn train(vocab_size: usize, min_freq: usize) {
 
         let affected_words = match inverted_index.remove(&best_pair) {
             Some(v) => v,
-            None => std::collections::HashSet::new(),
+            None    => HashSet::new(),
         };
 
         let mut updated: HashMap<(SymId, SymId), isize> = HashMap::new();
-        let mut new_index_entries: HashMap<(SymId, SymId), std::collections::HashSet<usize>> = HashMap::new();
+        let mut new_index_entries: HashMap<(SymId, SymId), HashSet<usize>> = HashMap::new();
 
         for word_idx in &affected_words {
             let (syms, freq) = &mut words[*word_idx];
@@ -313,8 +307,7 @@ fn train(vocab_size: usize, min_freq: usize) {
         }
 
         for (pair, indices) in new_index_entries {
-            let v = inverted_index.entry(pair).or_default();
-            v.extend(indices);
+            inverted_index.entry(pair).or_default().extend(indices);
         }
 
         if (i + 1) % 500 == 0 {
@@ -411,29 +404,6 @@ impl BPEEncoder {
         self.cache.insert(word.to_string(), ids.clone());
         ids
     }
-
-    fn encode_chunk(&self, chunk: &str) -> Vec<u16> {
-        let mut ids: Vec<u16> = Vec::new();
-        let mut cur_word = String::new();
-        for c in chunk.chars() {
-            let lc = c.to_lowercase().next().unwrap_or(c);
-            if is_french_char(lc) {
-                cur_word.push(lc);
-            } else {
-                if !cur_word.is_empty() {
-                    ids.extend(self.tokenize_word(&cur_word));
-                    cur_word.clear();
-                }
-                if !c.is_whitespace() {
-                    ids.push(*self.vocab.get(&c.to_string()).unwrap_or(&UNK_ID));
-                }
-            }
-        }
-        if !cur_word.is_empty() {
-            ids.extend(self.tokenize_word(&cur_word));
-        }
-        ids
-    }
 }
 
 fn split_into_chunks(text: &str, n: usize) -> Vec<&str> {
@@ -442,7 +412,6 @@ fn split_into_chunks(text: &str, n: usize) -> Vec<&str> {
     let mut start  = 0;
     while start < text.len() {
         let mut end = (start + chunk_size).min(text.len());
-        // Extend to next whitespace to avoid cutting mid-word
         while end < text.len() && !text.as_bytes()[end].is_ascii_whitespace() {
             end += 1;
         }
@@ -480,47 +449,68 @@ fn encode(mode: &str, output: &str) {
     let mut total_tokens: u64 = 0;
 
     for path in &all_files {
-        eprintln!("Loading {:?} ({:.2} GB)...", path.file_name().unwrap(),
+        eprintln!("Loading {:?} ({:.2} GB)...",
+            path.file_name().unwrap(),
             fs::metadata(path).map(|m| m.len()).unwrap_or(0) as f64 / 1e9);
         let text = match fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => { eprintln!("Warning: {:?}: {}", path, e); continue; }
         };
-        eprintln!("Loaded ({:.2} GB). Splitting and encoding...", text.len() as f64 / 1e9);
+        eprintln!("Loaded. Encoding...");
 
-        // Split into n_threads chunks at word boundaries
         let chunks = split_into_chunks(&text, n_threads);
-
         let bd = Arc::clone(&bytes_done);
         let np = Arc::clone(&next_print);
 
-        // Encode chunks in parallel
+        // Encode char by char inside each chunk for accurate progress
         let chunk_ids: Vec<Vec<u16>> = chunks
             .par_iter()
             .map(|chunk| {
-                let enc        = Arc::clone(&encoder);
-                let chunk_bytes = chunk.len() as u64;
-                let ids        = enc.encode_chunk(chunk);
+                let enc = Arc::clone(&encoder);
+                let mut ids: Vec<u16> = Vec::new();
+                let mut cur_word = String::new();
+                let mut local_bytes: u64 = 0;
 
-                // Update global byte counter
-                let total_done = bd.fetch_add(chunk_bytes, Ordering::Relaxed) + chunk_bytes;
-                let threshold  = np.load(Ordering::Relaxed);
-                if total_done >= threshold {
-                    if np.compare_exchange(threshold, threshold + print_every,
-                        Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-                        let pct       = total_done * 100 / total_bytes.max(1);
-                        let elapsed   = t0.elapsed().as_secs_f64();
-                        let remaining = elapsed / total_done as f64
-                            * total_bytes.saturating_sub(total_done) as f64;
-                        eprintln!("  [{:3}%] {:.2}/{:.2} GB ===> {}m{}s remaining ===> {} words cached",
-                            pct,
-                            total_done as f64 / 1e9,
-                            total_bytes as f64 / 1e9,
-                            (remaining / 60.0) as u64,
-                            (remaining % 60.0) as u64,
-                            enc.cache.len(),
-                        );
+                for c in chunk.chars() {
+                    let lc = c.to_lowercase().next().unwrap_or(c);
+                    local_bytes += c.len_utf8() as u64;
+
+                    if is_french_char(lc) {
+                        cur_word.push(lc);
+                    } else {
+                        if !cur_word.is_empty() {
+                            ids.extend(enc.tokenize_word(&cur_word));
+                            cur_word.clear();
+                        }
+                        if !c.is_whitespace() {
+                            ids.push(*enc.vocab.get(&c.to_string()).unwrap_or(&UNK_ID));
+                        }
                     }
+
+                    if local_bytes % 1_000_000 == 0 {
+                        let total_done = bd.fetch_add(1_000_000, Ordering::Relaxed) + 1_000_000;
+                        let threshold  = np.load(Ordering::Relaxed);
+                        if total_done >= threshold {
+                            if np.compare_exchange(threshold, threshold + print_every,
+                                Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                                let pct       = total_done * 100 / total_bytes.max(1);
+                                let elapsed   = t0.elapsed().as_secs_f64();
+                                let remaining = elapsed / total_done as f64
+                                    * total_bytes.saturating_sub(total_done) as f64;
+                                eprintln!("  [{:3}%] {:.2}/{:.2} GB ===> {}m{}s remaining ===> {} words cached",
+                                    pct,
+                                    total_done as f64 / 1e9,
+                                    total_bytes as f64 / 1e9,
+                                    (remaining / 60.0) as u64,
+                                    (remaining % 60.0) as u64,
+                                    enc.cache.len(),
+                                );
+                            }
+                        }
+                    }
+                }
+                if !cur_word.is_empty() {
+                    ids.extend(enc.tokenize_word(&cur_word));
                 }
                 ids
             })
