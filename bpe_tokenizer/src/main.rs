@@ -19,6 +19,7 @@ use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
+use aho_corasick::AhoCorasick;
 use dashmap::DashMap;
 
 const DEFAULT_VOCAB_SIZE: usize = 32000;
@@ -333,9 +334,11 @@ fn train(vocab_size: usize, min_freq: usize) {
 // ── ENCODE (parallelized by chunks within each file) ─────────────────────────
 
 struct BPEEncoder {
-    vocab  : HashMap<String, u16>,
-    merges : Vec<(String, String)>,
-    cache  : Arc<DashMap<String, Vec<u16>>>,
+    vocab      : HashMap<String, u16>,
+    merges     : Vec<(String, String)>,
+    // merge_rank: token_string → rank (index in merges, lower = higher priority)
+    merge_rank : HashMap<String, usize>,
+    cache      : Arc<DashMap<String, Vec<u16>>>,
 }
 
 impl BPEEncoder {
@@ -374,30 +377,49 @@ impl BPEEncoder {
             }
         }
 
+        // Build merge rank: merged token → priority (lower index = apply first)
+        let mut merge_rank: HashMap<String, usize> = HashMap::new();
+        for (rank, (a, b)) in merges.iter().enumerate() {
+            merge_rank.insert(format!("{}{}", a, b), rank);
+        }
+
         println!("Tokenizer loaded ===> {} tokens, {} merges", vocab.len(), merges.len());
-        Self { vocab, merges, cache: Arc::new(DashMap::new()) }
+        Self { vocab, merges, merge_rank, cache: Arc::new(DashMap::new()) }
     }
 
     fn tokenize_word(&self, word: &str) -> Vec<u16> {
         if let Some(ids) = self.cache.get(word) {
             return ids.clone();
         }
+
+        // Start with individual characters + WORD_END
         let mut symbols: Vec<String> = word.chars().map(|c| c.to_string()).collect();
         symbols.push(WORD_END.to_string());
-        for (a, b) in &self.merges {
-            let mut i = 0;
-            let mut new_syms: Vec<String> = Vec::with_capacity(symbols.len());
-            while i < symbols.len() {
-                if i + 1 < symbols.len() && &symbols[i] == a && &symbols[i+1] == b {
-                    new_syms.push(format!("{}{}", a, b));
-                    i += 2;
-                } else {
-                    new_syms.push(symbols[i].clone());
-                    i += 1;
+
+        // Apply merges using priority: always apply highest-priority merge first
+        loop {
+            // Find the best merge applicable in current symbols
+            let mut best: Option<(usize, usize)> = None; // (rank, position)
+            for i in 0..symbols.len().saturating_sub(1) {
+                let merged = format!("{}{}", symbols[i], symbols[i+1]);
+                if let Some(&rank) = self.merge_rank.get(&merged) {
+                    match best {
+                        None => best = Some((rank, i)),
+                        Some((best_rank, _)) if rank < best_rank => best = Some((rank, i)),
+                        _ => {}
+                    }
                 }
             }
-            symbols = new_syms;
+            match best {
+                None => break,
+                Some((_, pos)) => {
+                    let merged = format!("{}{}", symbols[pos], symbols[pos+1]);
+                    symbols[pos] = merged;
+                    symbols.remove(pos + 1);
+                }
+            }
         }
+
         let ids: Vec<u16> = symbols.iter()
             .map(|s| *self.vocab.get(s).unwrap_or(&UNK_ID))
             .collect();
@@ -441,7 +463,7 @@ fn encode(mode: &str, output: &str) {
 
     let t0         = Instant::now();
     let bytes_done = Arc::new(AtomicU64::new(0));
-    let print_every: u64 = 1_000_000; // every 1MB
+    let print_every: u64 = 100_000_000; // every 100MB
     let next_print = Arc::new(AtomicU64::new(print_every));
 
     let out_file   = fs::File::create(output).expect("Cannot create output file");
