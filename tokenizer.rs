@@ -374,7 +374,6 @@ fn encode(mode: &str, output: &str) {
         _ => panic!("mode must be pretrain or finetune"),
     };
 
-    // Load all files and compute total size for char-level progress
     let mut all_files: Vec<_> = Vec::new();
     visit_dirs(Path::new(dir), &mut |path| {
         if path.extension().and_then(|s| s.to_str()) == Some("txt") {
@@ -387,15 +386,17 @@ fn encode(mode: &str, output: &str) {
         .map(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
 
-    println!("\nEncoding {} corpus ===> {} ({} files, {:.1} GB)",
+    println!("\nEncoding {} corpus ===> {} ({} files, {:.2} GB)",
         mode, output, all_files.len(), total_bytes as f64 / 1e9);
-    let t0 = Instant::now();
 
-    let out_file = fs::File::create(output).expect("Cannot create output file");
-    let mut writer      = BufWriter::new(out_file);
+    let out_file     = fs::File::create(output).expect("Cannot create output file");
+    let mut writer   = BufWriter::new(out_file);
     let mut total_tokens: u64 = 0;
     let mut bytes_done  : u64 = 0;
-    let mut last_pct    : u64 = 0;
+    let print_every     : u64 = 1_000_000; // every 1MB
+    let mut next_print  : u64 = print_every;
+    let t0 = Instant::now();
+    let mut cur_word = String::new();
 
     for path in &all_files {
         let text = match fs::read_to_string(path) {
@@ -403,38 +404,60 @@ fn encode(mode: &str, output: &str) {
             Err(e) => { eprintln!("\nWarning: {:?}: {}", path, e); continue; }
         };
 
-        let file_bytes = text.len() as u64;
-        let ids = encoder.encode_text(&text, add_bos_eos);
-        for id in &ids {
-            writer.write_all(&id.to_le_bytes()).unwrap();
-        }
-        total_tokens += ids.len() as u64;
-        bytes_done   += file_bytes;
+        for c in text.chars() {
+            let lc = c.to_lowercase().next().unwrap_or(c);
+            bytes_done += c.len_utf8() as u64;
 
-        let pct = bytes_done * 100 / total_bytes.max(1);
-        if pct >= last_pct + 1 {
-            last_pct  = pct;
-            let elapsed   = t0.elapsed().as_secs_f64();
-            let remaining = if bytes_done > 0 {
-                elapsed / bytes_done as f64 * (total_bytes - bytes_done) as f64
-            } else { 0.0 };
-            let cache_size = encoder.word_cache.borrow().len();
-            print!("\r  [{:3}%] {:.2}/{:.2} GB ===> {}M tokens ===> {}m{}s remaining ===> {} words cached   ",
-                pct,
-                bytes_done as f64 / 1e9,
-                total_bytes as f64 / 1e9,
-                total_tokens / 1_000_000,
-                (remaining / 60.0) as u64,
-                (remaining % 60.0) as u64,
-                cache_size,
-            );
-            io::stdout().flush().unwrap();
+            if is_french_char(lc) {
+                cur_word.push(lc);
+            } else {
+                if !cur_word.is_empty() {
+                    let ids = encoder.tokenize_word(&cur_word);
+                    total_tokens += ids.len() as u64;
+                    for id in &ids { writer.write_all(&id.to_le_bytes()).unwrap(); }
+                    cur_word.clear();
+                }
+                if !c.is_whitespace() {
+                    let id = *encoder.vocab.get(&c.to_string()).unwrap_or(&UNK_ID);
+                    writer.write_all(&id.to_le_bytes()).unwrap();
+                    total_tokens += 1;
+                }
+            }
+
+            if bytes_done >= next_print {
+                next_print += print_every;
+                let pct       = bytes_done * 100 / total_bytes.max(1);
+                let elapsed   = t0.elapsed().as_secs_f64();
+                let remaining = elapsed / bytes_done as f64 * (total_bytes - bytes_done) as f64;
+                print!("\r  [{:3}%] {:.2}/{:.2} GB ===> {}M tokens ===> {}m{}s remaining ===> {} words cached   ",
+                    pct,
+                    bytes_done as f64 / 1e9,
+                    total_bytes as f64 / 1e9,
+                    total_tokens / 1_000_000,
+                    (remaining / 60.0) as u64,
+                    (remaining % 60.0) as u64,
+                    encoder.word_cache.borrow().len(),
+                );
+                io::stdout().flush().unwrap();
+            }
         }
+
+        if add_bos_eos {
+            writer.write_all(&BOS_ID.to_le_bytes()).unwrap();
+            writer.write_all(&EOS_ID.to_le_bytes()).unwrap();
+            total_tokens += 2;
+        }
+    }
+
+    if !cur_word.is_empty() {
+        let ids = encoder.tokenize_word(&cur_word);
+        total_tokens += ids.len() as u64;
+        for id in &ids { writer.write_all(&id.to_le_bytes()).unwrap(); }
     }
 
     println!("\nEncoding done ===> {}M tokens in {:.1}s ===> {}",
         total_tokens / 1_000_000, t0.elapsed().as_secs_f64(), output);
-    println!("Word cache ===> {} unique words encoded", encoder.word_cache.borrow().len());
+    println!("Word cache ===> {} unique words", encoder.word_cache.borrow().len());
 }
 
 
