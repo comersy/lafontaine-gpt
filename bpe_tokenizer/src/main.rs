@@ -399,7 +399,7 @@ fn encode(mode: &str, output: &str) {
 
     let t0         = Instant::now();
     let bytes_done = Arc::new(AtomicU64::new(0));
-    let print_every: u64 = 1_000_000; // every 1MB
+    let print_every: u64 = 10_000_000; // every 10MB
     let next_print = Arc::new(AtomicU64::new(print_every));
 
     let out_file   = fs::File::create(output).expect("Cannot create output file");
@@ -413,7 +413,9 @@ fn encode(mode: &str, output: &str) {
         };
 
         // Split into n_threads chunks at word boundaries
+        eprintln!("Loaded. Splitting into chunks...");
         let chunks = split_into_chunks(&text, n_threads);
+        eprintln!("Split into {} chunks. Encoding...", chunks.len());
 
         let bd = Arc::clone(&bytes_done);
         let np = Arc::clone(&next_print);
