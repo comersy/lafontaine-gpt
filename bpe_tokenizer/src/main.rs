@@ -118,27 +118,55 @@ impl SymVocab {
 // ── TRAIN ─────────────────────────────────────────────────────────────────────
 
 fn get_word_freqs(text: &str, min_freq: usize, vocab: &mut SymVocab) -> Vec<(Vec<SymId>, usize)> {
-    print!("  [1/4] Counting word frequencies... ");
+    print!("  [1/4] Counting word frequencies (parallel)... ");
     io::stdout().flush().unwrap();
     let t = Instant::now();
 
-    let mut raw_freq: HashMap<String, usize> = HashMap::new();
-    let mut cur = String::new();
-    let total = text.len();
-    let mut last_pct = 0usize;
+    let n_threads  = rayon::current_num_threads();
+    let chunk_size = (text.len() / n_threads).max(1);
 
-    for (i, c) in text.chars().enumerate() {
-        let lc = c.to_lowercase().next().unwrap_or(c);
-        if is_french_char(lc) {
-            cur.push(lc);
-        } else if !cur.is_empty() {
-            *raw_freq.entry(cur.clone()).or_insert(0) += 1;
-            cur.clear();
+    // Split text into chunks at whitespace boundaries
+    let mut chunks: Vec<&str> = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + chunk_size).min(text.len());
+        while end < text.len() && !text.as_bytes()[end].is_ascii_whitespace() {
+            end += 1;
         }
-        let pct = i * 100 / total;
-        if pct >= last_pct + 10 { last_pct = pct; print!("{}%... ", pct); io::stdout().flush().unwrap(); }
+        chunks.push(&text[start..end]);
+        start = end;
     }
-    if !cur.is_empty() { *raw_freq.entry(cur).or_insert(0) += 1; }
+
+    // Each thread counts its own chunk
+    let partial_freqs: Vec<HashMap<String, usize>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut freq: HashMap<String, usize> = HashMap::new();
+            let mut cur = String::new();
+            for c in chunk.chars() {
+                let lc = c.to_lowercase().next().unwrap_or(c);
+                if is_french_char(lc) {
+                    cur.push(lc);
+                } else if !cur.is_empty() {
+                    *freq.entry(cur.clone()).or_insert(0) += 1;
+                    cur.clear();
+                }
+            }
+            if !cur.is_empty() {
+                *freq.entry(cur).or_insert(0) += 1;
+            }
+            freq
+        })
+        .collect();
+
+    // Merge all partial frequency maps
+    let mut raw_freq: HashMap<String, usize> = HashMap::new();
+    for partial in partial_freqs {
+        for (word, freq) in partial {
+            *raw_freq.entry(word).or_insert(0) += freq;
+        }
+    }
+
     println!("done in {:.1}s ({} unique words)", t.elapsed().as_secs_f64(), raw_freq.len());
 
     print!("  [2/4] Building char-level word list (min_freq={})... ", min_freq);
@@ -399,7 +427,7 @@ fn encode(mode: &str, output: &str) {
 
     let t0         = Instant::now();
     let bytes_done = Arc::new(AtomicU64::new(0));
-    let print_every: u64 = 10_000_000; // every 10MB
+    let print_every: u64 = 50_000_000; // every 50MB
     let next_print = Arc::new(AtomicU64::new(print_every));
 
     let out_file   = fs::File::create(output).expect("Cannot create output file");
@@ -413,9 +441,7 @@ fn encode(mode: &str, output: &str) {
         };
 
         // Split into n_threads chunks at word boundaries
-        eprintln!("Loaded. Splitting into chunks...");
         let chunks = split_into_chunks(&text, n_threads);
-        eprintln!("Split into {} chunks. Encoding...", chunks.len());
 
         let bd = Arc::clone(&bytes_done);
         let np = Arc::clone(&next_print);
