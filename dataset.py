@@ -30,7 +30,7 @@ BIN_FILES = {
     "pretrain" : "pretrain_ids.bin",
     "finetune" : "finetune_ids.bin",
 }
-TOKENIZER_EXE = ".\\tokenizer_train.exe"
+TOKENIZER_EXE = ".\\bpe_tokenizer\\target\\release\\tokenizer_train.exe"
 
 
 # ── Auto-encode ───────────────────────────────────────────────────────────────
