@@ -19,7 +19,6 @@ use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
-use aho_corasick::AhoCorasick;
 use dashmap::DashMap;
 
 const DEFAULT_VOCAB_SIZE: usize = 32000;
@@ -335,8 +334,6 @@ fn train(vocab_size: usize, min_freq: usize) {
 
 struct BPEEncoder {
     vocab      : HashMap<String, u16>,
-    merges     : Vec<(String, String)>,
-    // merge_rank: token_string → rank (index in merges, lower = higher priority)
     merge_rank : HashMap<String, usize>,
     cache      : Arc<DashMap<String, Vec<u16>>>,
 }
@@ -384,7 +381,7 @@ impl BPEEncoder {
         }
 
         println!("Tokenizer loaded ===> {} tokens, {} merges", vocab.len(), merges.len());
-        Self { vocab, merges, merge_rank, cache: Arc::new(DashMap::new()) }
+        Self { vocab, merge_rank, cache: Arc::new(DashMap::new()) }
     }
 
     fn tokenize_word(&self, word: &str) -> Vec<u16> {
@@ -463,7 +460,7 @@ fn encode(mode: &str, output: &str) {
 
     let t0         = Instant::now();
     let bytes_done = Arc::new(AtomicU64::new(0));
-    let print_every: u64 = 100_000_000; // every 100MB
+    let print_every: u64 = 1_000_000; // every 1MB
     let next_print = Arc::new(AtomicU64::new(print_every));
 
     let out_file   = fs::File::create(output).expect("Cannot create output file");

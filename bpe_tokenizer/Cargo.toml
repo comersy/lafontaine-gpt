@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 rayon       = "1.10"
 dashmap     = "6.1"
-aho-corasick = "1.1"
 
 [profile.release]
 opt-level = 3
