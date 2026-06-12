@@ -342,31 +342,6 @@ impl BPEEncoder {
         ids
     }
 
-    fn encode_text(&self, text: &str, add_bos_eos: bool) -> Vec<u16> {
-        let mut ids: Vec<u16> = Vec::new();
-        if add_bos_eos { ids.push(BOS_ID); }
-
-        let mut cur_word = String::new();
-        for c in text.chars() {
-            let lc = c.to_lowercase().next().unwrap_or(c);
-            if is_french_char(lc) {
-                cur_word.push(lc);
-            } else {
-                if !cur_word.is_empty() {
-                    ids.extend(self.tokenize_word(&cur_word));
-                    cur_word.clear();
-                }
-                if !c.is_whitespace() {
-                    ids.push(*self.vocab.get(&c.to_string()).unwrap_or(&UNK_ID));
-                }
-            }
-        }
-        if !cur_word.is_empty() {
-            ids.extend(self.tokenize_word(&cur_word));
-        }
-        if add_bos_eos { ids.push(EOS_ID); }
-        ids
-    }
 }
 
 fn encode(mode: &str, output: &str) {
@@ -387,19 +362,79 @@ fn encode(mode: &str, output: &str) {
         mode, output, all_files.len(), total_bytes as f64 / 1e9,
         rayon::current_num_threads());
 
-    let t0 = Instant::now();
+    let t0              = Instant::now();
+    let bytes_done      = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let tokens_done     = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let print_every     : u64 = 1_000_000; // every 1MB
+    let next_print      = Arc::new(std::sync::atomic::AtomicU64::new(print_every));
 
-    // Encode all files in parallel
+    // Encode all files in parallel, each returns (index, ids)
     let results: Vec<(usize, Vec<u16>)> = all_files
         .par_iter()
         .enumerate()
         .map(|(i, path)| {
             let text = fs::read_to_string(path).unwrap_or_default();
-            let ids  = encoder.encode_text(&text, add_bos_eos);
-            if (i + 1) % 5 == 0 || i == 0 {
-                let pct = (i + 1) * 100 / all_files.len();
-                eprintln!("  [{:3}%] {}/{} files encoded", pct, i + 1, all_files.len());
+            let file_bytes = text.len() as u64;
+            let enc  = Arc::clone(&encoder);
+            let bd   = Arc::clone(&bytes_done);
+            let td   = Arc::clone(&tokens_done);
+            let np   = Arc::clone(&next_print);
+
+            // Encode char by char for accurate progress
+            let mut ids: Vec<u16> = Vec::new();
+            if add_bos_eos { ids.push(BOS_ID); }
+            let mut cur_word = String::new();
+            let mut local_bytes: u64 = 0;
+
+            for c in text.chars() {
+                let lc = c.to_lowercase().next().unwrap_or(c);
+                local_bytes += c.len_utf8() as u64;
+
+                if is_french_char(lc) {
+                    cur_word.push(lc);
+                } else {
+                    if !cur_word.is_empty() {
+                        ids.extend(enc.tokenize_word(&cur_word));
+                        cur_word.clear();
+                    }
+                    if !c.is_whitespace() {
+                        ids.push(*enc.vocab.get(&c.to_string()).unwrap_or(&UNK_ID));
+                    }
+                }
+
+                // Update shared counters every 1MB of local work
+                if local_bytes % 1_000_000 == 0 {
+                    let total_done = bd.fetch_add(1_000_000, std::sync::atomic::Ordering::Relaxed) + 1_000_000;
+                    td.store(ids.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+                    let threshold = np.load(std::sync::atomic::Ordering::Relaxed);
+                    if total_done >= threshold {
+                        np.fetch_add(print_every, std::sync::atomic::Ordering::Relaxed);
+                        let pct       = total_done * 100 / total_bytes.max(1);
+                        let elapsed   = t0.elapsed().as_secs_f64();
+                        let remaining = if total_done > 0 {
+                            elapsed / total_done as f64 * (total_bytes - total_done.min(total_bytes)) as f64
+                        } else { 0.0 };
+                        eprintln!("  [{:3}%] {:.2}/{:.2} GB ===> {}m{}s remaining ===> {} words cached",
+                            pct,
+                            total_done as f64 / 1e9,
+                            total_bytes as f64 / 1e9,
+                            (remaining / 60.0) as u64,
+                            (remaining % 60.0) as u64,
+                            enc.cache.len(),
+                        );
+                    }
+                }
             }
+            if !cur_word.is_empty() {
+                ids.extend(enc.tokenize_word(&cur_word));
+            }
+            if add_bos_eos { ids.push(EOS_ID); }
+
+            // Final update for remaining bytes
+            let rem = file_bytes - (local_bytes / 1_000_000) * 1_000_000;
+            bd.fetch_add(rem, std::sync::atomic::Ordering::Relaxed);
+
             (i, ids)
         })
         .collect();
