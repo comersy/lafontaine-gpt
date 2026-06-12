@@ -472,7 +472,7 @@ fn encode(mode: &str, output: &str) {
 
     let t0         = Instant::now();
     let bytes_done = Arc::new(AtomicU64::new(0));
-    let print_every: u64 = 50_000_000; // every 50MB
+    let print_every: u64 = 1_000_000; // every 1MB
     let next_print = Arc::new(AtomicU64::new(print_every));
 
     let out_file   = fs::File::create(output).expect("Cannot create output file");
@@ -480,10 +480,13 @@ fn encode(mode: &str, output: &str) {
     let mut total_tokens: u64 = 0;
 
     for path in &all_files {
+        eprintln!("Loading {:?} ({:.2} GB)...", path.file_name().unwrap(),
+            fs::metadata(path).map(|m| m.len()).unwrap_or(0) as f64 / 1e9);
         let text = match fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => { eprintln!("Warning: {:?}: {}", path, e); continue; }
         };
+        eprintln!("Loaded ({:.2} GB). Splitting and encoding...", text.len() as f64 / 1e9);
 
         // Split into n_threads chunks at word boundaries
         let chunks = split_into_chunks(&text, n_threads);
