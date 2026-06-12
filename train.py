@@ -26,9 +26,9 @@ from model     import GPT, GPTConfig
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 PRETRAIN_CONFIG = {
-    "n_layer"    : 6,
-    "n_head"     : 6,
-    "n_embd"     : 384,
+    "n_layer"    : 8,
+    "n_head"     : 8,
+    "n_embd"     : 512,
     "dropout"    : 0.1,
     "max_iters"  : 50000,
     "lr"         : 3e-4,
