@@ -195,40 +195,6 @@ fn build_pair_counts(words: &[(Vec<SymId>, usize)]) -> HashMap<(SymId, SymId), u
     pairs
 }
 
-fn apply_merge(
-    words: &mut Vec<(Vec<SymId>, usize)>,
-    pair_counts: &mut HashMap<(SymId, SymId), usize>,
-    best: (SymId, SymId),
-    new_id: SymId,
-) {
-    for (syms, freq) in words.iter_mut() {
-        let mut i = 0;
-        while i < syms.len().saturating_sub(1) {
-            if syms[i] == best.0 && syms[i+1] == best.1 {
-                if i > 0 {
-                    let cnt = pair_counts.entry((syms[i-1], syms[i])).or_insert(0);
-                    *cnt = cnt.saturating_sub(*freq);
-                }
-                if i + 2 < syms.len() {
-                    let cnt = pair_counts.entry((syms[i+1], syms[i+2])).or_insert(0);
-                    *cnt = cnt.saturating_sub(*freq);
-                }
-                syms[i] = new_id;
-                syms.remove(i + 1);
-                if i > 0 {
-                    *pair_counts.entry((syms[i-1], new_id)).or_insert(0) += *freq;
-                }
-                if i + 1 < syms.len() {
-                    *pair_counts.entry((new_id, syms[i+1])).or_insert(0) += *freq;
-                }
-            } else {
-                i += 1;
-            }
-        }
-    }
-    pair_counts.remove(&best);
-}
-
 fn train(vocab_size: usize, min_freq: usize) {
     println!("Loading corpus...");
     let t = Instant::now();
@@ -257,20 +223,88 @@ fn train(vocab_size: usize, min_freq: usize) {
     let mut pair_counts = build_pair_counts(&words);
     println!("done in {:.1}s ({} unique pairs)\n", t.elapsed().as_secs_f64(), pair_counts.len());
 
+    // Build lazy BinaryHeap — (count, pair) max-heap
+    use std::collections::BinaryHeap;
+    let mut heap: BinaryHeap<(usize, (SymId, SymId))> = BinaryHeap::with_capacity(pair_counts.len());
+    for (&pair, &count) in &pair_counts {
+        heap.push((count, pair));
+    }
+
     println!("  Learning merges...\n");
     let mut merges: Vec<(String, String)> = Vec::with_capacity(n_merges);
     let t0 = Instant::now();
 
     for i in 0..n_merges {
-        let best = match pair_counts.iter().max_by_key(|(_, &v)| v) {
-            Some((&k, _)) => k,
-            None => { println!("No more pairs after {} merges.", i); break; }
+        // Pop from heap, skipping stale entries (lazy deletion)
+        let best = loop {
+            match heap.pop() {
+                None => {
+                    println!("No more pairs after {} merges.", i);
+                    break None;
+                }
+                Some((count, pair)) => {
+                    // Check if this entry is still valid
+                    let real_count = pair_counts.get(&pair).copied().unwrap_or(0);
+                    if real_count == count && count > 0 {
+                        break Some((count, pair));
+                    }
+                    // Stale entry — skip
+                }
+            }
         };
-        let merged = format!("{}{}", sym_vocab.sym(best.0), sym_vocab.sym(best.1));
+
+        let (_, best_pair) = match best {
+            Some(b) => b,
+            None => break,
+        };
+
+        let merged = format!("{}{}", sym_vocab.sym(best_pair.0), sym_vocab.sym(best_pair.1));
         let new_id = sym_vocab.get_or_insert(&merged);
-        merges.push((sym_vocab.sym(best.0).to_string(), sym_vocab.sym(best.1).to_string()));
+        merges.push((sym_vocab.sym(best_pair.0).to_string(), sym_vocab.sym(best_pair.1).to_string()));
         vocab_tokens.push(merged.clone());
-        apply_merge(&mut words, &mut pair_counts, best, new_id);
+
+        // Apply merge and collect updated pairs
+        let mut updated: HashMap<(SymId, SymId), isize> = HashMap::new();
+
+        for (syms, freq) in words.iter_mut() {
+            let mut i = 0;
+            while i < syms.len().saturating_sub(1) {
+                if syms[i] == best_pair.0 && syms[i+1] == best_pair.1 {
+                    // Remove pairs around merge site
+                    if i > 0 {
+                        *updated.entry((syms[i-1], syms[i])).or_insert(0) -= *freq as isize;
+                    }
+                    if i + 2 < syms.len() {
+                        *updated.entry((syms[i+1], syms[i+2])).or_insert(0) -= *freq as isize;
+                    }
+                    syms[i] = new_id;
+                    syms.remove(i + 1);
+                    // Add new pairs around merge site
+                    if i > 0 {
+                        *updated.entry((syms[i-1], new_id)).or_insert(0) += *freq as isize;
+                    }
+                    if i + 1 < syms.len() {
+                        *updated.entry((new_id, syms[i+1])).or_insert(0) += *freq as isize;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        pair_counts.remove(&best_pair);
+
+        // Apply updates and push new counts to heap
+        for (pair, delta) in updated {
+            let count = pair_counts.entry(pair).or_insert(0);
+            if delta >= 0 {
+                *count = count.saturating_add(delta as usize);
+            } else {
+                *count = count.saturating_sub((-delta) as usize);
+            }
+            if *count > 0 {
+                heap.push((*count, pair));
+            }
+        }
 
         if (i + 1) % 500 == 0 {
             let elapsed   = t0.elapsed().as_secs_f64();
