@@ -185,16 +185,6 @@ fn get_word_freqs(text: &str, min_freq: usize, vocab: &mut SymVocab) -> Vec<(Vec
     words
 }
 
-fn build_pair_counts(words: &[(Vec<SymId>, usize)]) -> HashMap<(SymId, SymId), usize> {
-    let mut pairs: HashMap<(SymId, SymId), usize> = HashMap::new();
-    for (syms, freq) in words {
-        for i in 0..syms.len().saturating_sub(1) {
-            *pairs.entry((syms[i], syms[i+1])).or_insert(0) += freq;
-        }
-    }
-    pairs
-}
-
 fn train(vocab_size: usize, min_freq: usize) {
     println!("Loading corpus...");
     let t = Instant::now();
@@ -217,13 +207,30 @@ fn train(vocab_size: usize, min_freq: usize) {
     let n_merges = vocab_size.saturating_sub(vocab_tokens.len());
     println!("{} base tokens ===> {} merges to learn", vocab_tokens.len(), n_merges);
 
-    print!("  [4/4] Building initial pair counts... ");
+    // Build pair counts + inverted index simultaneously
+    print!("  [4/4] Building pair counts + inverted index... ");
     io::stdout().flush().unwrap();
     let t = Instant::now();
-    let mut pair_counts = build_pair_counts(&words);
+
+    let mut pair_counts: HashMap<(SymId, SymId), usize> = HashMap::new();
+    // inverted_index: pair → set of word indices that contain this pair
+    let mut inverted_index: HashMap<(SymId, SymId), Vec<usize>> = HashMap::new();
+
+    for (word_idx, (syms, freq)) in words.iter().enumerate() {
+        for i in 0..syms.len().saturating_sub(1) {
+            let pair = (syms[i], syms[i+1]);
+            *pair_counts.entry(pair).or_insert(0) += freq;
+            inverted_index.entry(pair).or_default().push(word_idx);
+        }
+    }
+    // Deduplicate word indices in inverted index
+    for v in inverted_index.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
     println!("done in {:.1}s ({} unique pairs)\n", t.elapsed().as_secs_f64(), pair_counts.len());
 
-    // Build lazy BinaryHeap — (count, pair) max-heap
+    // Build lazy BinaryHeap
     use std::collections::BinaryHeap;
     let mut heap: BinaryHeap<(usize, (SymId, SymId))> = BinaryHeap::with_capacity(pair_counts.len());
     for (&pair, &count) in &pair_counts {
@@ -235,27 +242,20 @@ fn train(vocab_size: usize, min_freq: usize) {
     let t0 = Instant::now();
 
     for i in 0..n_merges {
-        // Pop from heap, skipping stale entries (lazy deletion)
-        let best = loop {
+        // Find best pair via lazy heap
+        let best_pair = loop {
             match heap.pop() {
-                None => {
-                    println!("No more pairs after {} merges.", i);
-                    break None;
-                }
+                None => break None,
                 Some((count, pair)) => {
-                    // Check if this entry is still valid
-                    let real_count = pair_counts.get(&pair).copied().unwrap_or(0);
-                    if real_count == count && count > 0 {
-                        break Some((count, pair));
-                    }
-                    // Stale entry — skip
+                    let real = pair_counts.get(&pair).copied().unwrap_or(0);
+                    if real == count && count > 0 { break Some(pair); }
                 }
             }
         };
 
-        let (_, best_pair) = match best {
-            Some(b) => b,
-            None => break,
+        let best_pair = match best_pair {
+            Some(p) => p,
+            None => { println!("No more pairs after {} merges.", i); break; }
         };
 
         let merged = format!("{}{}", sym_vocab.sym(best_pair.0), sym_vocab.sym(best_pair.1));
@@ -263,37 +263,55 @@ fn train(vocab_size: usize, min_freq: usize) {
         merges.push((sym_vocab.sym(best_pair.0).to_string(), sym_vocab.sym(best_pair.1).to_string()));
         vocab_tokens.push(merged.clone());
 
-        // Apply merge and collect updated pairs
-        let mut updated: HashMap<(SymId, SymId), isize> = HashMap::new();
+        // Get only the words that contain this pair via inverted index
+        let affected_words = match inverted_index.remove(&best_pair) {
+            Some(v) => v,
+            None => vec![],
+        };
 
-        for (syms, freq) in words.iter_mut() {
-            let mut i = 0;
-            while i < syms.len().saturating_sub(1) {
-                if syms[i] == best_pair.0 && syms[i+1] == best_pair.1 {
-                    // Remove pairs around merge site
-                    if i > 0 {
-                        *updated.entry((syms[i-1], syms[i])).or_insert(0) -= *freq as isize;
+        let mut updated: HashMap<(SymId, SymId), isize> = HashMap::new();
+        let mut new_index_entries: HashMap<(SymId, SymId), Vec<usize>> = HashMap::new();
+
+        for word_idx in &affected_words {
+            let (syms, freq) = &mut words[*word_idx];
+            let mut j = 0;
+            while j < syms.len().saturating_sub(1) {
+                if syms[j] == best_pair.0 && syms[j+1] == best_pair.1 {
+                    // Remove old pairs from counts
+                    if j > 0 {
+                        *updated.entry((syms[j-1], syms[j])).or_insert(0) -= *freq as isize;
+                        // Remove from inverted index
+                        if let Some(v) = inverted_index.get_mut(&(syms[j-1], syms[j])) {
+                            v.retain(|&x| x != *word_idx);
+                        }
                     }
-                    if i + 2 < syms.len() {
-                        *updated.entry((syms[i+1], syms[i+2])).or_insert(0) -= *freq as isize;
+                    if j + 2 < syms.len() {
+                        *updated.entry((syms[j+1], syms[j+2])).or_insert(0) -= *freq as isize;
+                        if let Some(v) = inverted_index.get_mut(&(syms[j+1], syms[j+2])) {
+                            v.retain(|&x| x != *word_idx);
+                        }
                     }
-                    syms[i] = new_id;
-                    syms.remove(i + 1);
-                    // Add new pairs around merge site
-                    if i > 0 {
-                        *updated.entry((syms[i-1], new_id)).or_insert(0) += *freq as isize;
+                    // Apply merge
+                    syms[j] = new_id;
+                    syms.remove(j + 1);
+                    // Add new pairs
+                    if j > 0 {
+                        *updated.entry((syms[j-1], new_id)).or_insert(0) += *freq as isize;
+                        new_index_entries.entry((syms[j-1], new_id)).or_default().push(*word_idx);
                     }
-                    if i + 1 < syms.len() {
-                        *updated.entry((new_id, syms[i+1])).or_insert(0) += *freq as isize;
+                    if j + 1 < syms.len() {
+                        *updated.entry((new_id, syms[j+1])).or_insert(0) += *freq as isize;
+                        new_index_entries.entry((new_id, syms[j+1])).or_default().push(*word_idx);
                     }
                 } else {
-                    i += 1;
+                    j += 1;
                 }
             }
         }
+
         pair_counts.remove(&best_pair);
 
-        // Apply updates and push new counts to heap
+        // Apply count updates and push to heap
         for (pair, delta) in updated {
             let count = pair_counts.entry(pair).or_insert(0);
             if delta >= 0 {
@@ -304,6 +322,14 @@ fn train(vocab_size: usize, min_freq: usize) {
             if *count > 0 {
                 heap.push((*count, pair));
             }
+        }
+
+        // Merge new inverted index entries
+        for (pair, mut indices) in new_index_entries {
+            let v = inverted_index.entry(pair).or_default();
+            v.extend(indices.drain(..));
+            v.sort_unstable();
+            v.dedup();
         }
 
         if (i + 1) % 500 == 0 {
