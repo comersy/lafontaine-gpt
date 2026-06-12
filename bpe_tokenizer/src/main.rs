@@ -213,20 +213,14 @@ fn train(vocab_size: usize, min_freq: usize) {
     let t = Instant::now();
 
     let mut pair_counts: HashMap<(SymId, SymId), usize> = HashMap::new();
-    // inverted_index: pair → set of word indices that contain this pair
-    let mut inverted_index: HashMap<(SymId, SymId), Vec<usize>> = HashMap::new();
+    let mut inverted_index: HashMap<(SymId, SymId), std::collections::HashSet<usize>> = HashMap::new();
 
     for (word_idx, (syms, freq)) in words.iter().enumerate() {
         for i in 0..syms.len().saturating_sub(1) {
             let pair = (syms[i], syms[i+1]);
             *pair_counts.entry(pair).or_insert(0) += freq;
-            inverted_index.entry(pair).or_default().push(word_idx);
+            inverted_index.entry(pair).or_default().insert(word_idx);
         }
-    }
-    // Deduplicate word indices in inverted index
-    for v in inverted_index.values_mut() {
-        v.sort_unstable();
-        v.dedup();
     }
     println!("done in {:.1}s ({} unique pairs)\n", t.elapsed().as_secs_f64(), pair_counts.len());
 
@@ -263,45 +257,40 @@ fn train(vocab_size: usize, min_freq: usize) {
         merges.push((sym_vocab.sym(best_pair.0).to_string(), sym_vocab.sym(best_pair.1).to_string()));
         vocab_tokens.push(merged.clone());
 
-        // Get only the words that contain this pair via inverted index
         let affected_words = match inverted_index.remove(&best_pair) {
             Some(v) => v,
-            None => vec![],
+            None => std::collections::HashSet::new(),
         };
 
         let mut updated: HashMap<(SymId, SymId), isize> = HashMap::new();
-        let mut new_index_entries: HashMap<(SymId, SymId), Vec<usize>> = HashMap::new();
+        let mut new_index_entries: HashMap<(SymId, SymId), std::collections::HashSet<usize>> = HashMap::new();
 
         for word_idx in &affected_words {
             let (syms, freq) = &mut words[*word_idx];
             let mut j = 0;
             while j < syms.len().saturating_sub(1) {
                 if syms[j] == best_pair.0 && syms[j+1] == best_pair.1 {
-                    // Remove old pairs from counts
                     if j > 0 {
                         *updated.entry((syms[j-1], syms[j])).or_insert(0) -= *freq as isize;
-                        // Remove from inverted index
                         if let Some(v) = inverted_index.get_mut(&(syms[j-1], syms[j])) {
-                            v.retain(|&x| x != *word_idx);
+                            v.remove(word_idx);
                         }
                     }
                     if j + 2 < syms.len() {
                         *updated.entry((syms[j+1], syms[j+2])).or_insert(0) -= *freq as isize;
                         if let Some(v) = inverted_index.get_mut(&(syms[j+1], syms[j+2])) {
-                            v.retain(|&x| x != *word_idx);
+                            v.remove(word_idx);
                         }
                     }
-                    // Apply merge
                     syms[j] = new_id;
                     syms.remove(j + 1);
-                    // Add new pairs
                     if j > 0 {
                         *updated.entry((syms[j-1], new_id)).or_insert(0) += *freq as isize;
-                        new_index_entries.entry((syms[j-1], new_id)).or_default().push(*word_idx);
+                        new_index_entries.entry((syms[j-1], new_id)).or_default().insert(*word_idx);
                     }
                     if j + 1 < syms.len() {
                         *updated.entry((new_id, syms[j+1])).or_insert(0) += *freq as isize;
-                        new_index_entries.entry((new_id, syms[j+1])).or_default().push(*word_idx);
+                        new_index_entries.entry((new_id, syms[j+1])).or_default().insert(*word_idx);
                     }
                 } else {
                     j += 1;
@@ -311,7 +300,6 @@ fn train(vocab_size: usize, min_freq: usize) {
 
         pair_counts.remove(&best_pair);
 
-        // Apply count updates and push to heap
         for (pair, delta) in updated {
             let count = pair_counts.entry(pair).or_insert(0);
             if delta >= 0 {
@@ -324,12 +312,9 @@ fn train(vocab_size: usize, min_freq: usize) {
             }
         }
 
-        // Merge new inverted index entries
-        for (pair, mut indices) in new_index_entries {
+        for (pair, indices) in new_index_entries {
             let v = inverted_index.entry(pair).or_default();
-            v.extend(indices.drain(..));
-            v.sort_unstable();
-            v.dedup();
+            v.extend(indices);
         }
 
         if (i + 1) % 500 == 0 {
