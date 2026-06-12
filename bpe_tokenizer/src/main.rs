@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::env;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
 use dashmap::DashMap;
 
@@ -263,7 +264,7 @@ fn train(vocab_size: usize, min_freq: usize) {
 }
 
 
-// ── ENCODE (parallelized) ─────────────────────────────────────────────────────
+// ── ENCODE (parallelized by chunks within each file) ─────────────────────────
 
 struct BPEEncoder {
     vocab  : HashMap<String, u16>,
@@ -315,10 +316,8 @@ impl BPEEncoder {
         if let Some(ids) = self.cache.get(word) {
             return ids.clone();
         }
-
         let mut symbols: Vec<String> = word.chars().map(|c| c.to_string()).collect();
         symbols.push(WORD_END.to_string());
-
         for (a, b) in &self.merges {
             let mut i = 0;
             let mut new_syms: Vec<String> = Vec::with_capacity(symbols.len());
@@ -333,19 +332,56 @@ impl BPEEncoder {
             }
             symbols = new_syms;
         }
-
         let ids: Vec<u16> = symbols.iter()
             .map(|s| *self.vocab.get(s).unwrap_or(&UNK_ID))
             .collect();
-
         self.cache.insert(word.to_string(), ids.clone());
         ids
     }
 
+    fn encode_chunk(&self, chunk: &str) -> Vec<u16> {
+        let mut ids: Vec<u16> = Vec::new();
+        let mut cur_word = String::new();
+        for c in chunk.chars() {
+            let lc = c.to_lowercase().next().unwrap_or(c);
+            if is_french_char(lc) {
+                cur_word.push(lc);
+            } else {
+                if !cur_word.is_empty() {
+                    ids.extend(self.tokenize_word(&cur_word));
+                    cur_word.clear();
+                }
+                if !c.is_whitespace() {
+                    ids.push(*self.vocab.get(&c.to_string()).unwrap_or(&UNK_ID));
+                }
+            }
+        }
+        if !cur_word.is_empty() {
+            ids.extend(self.tokenize_word(&cur_word));
+        }
+        ids
+    }
+}
+
+fn split_into_chunks(text: &str, n: usize) -> Vec<&str> {
+    let chunk_size = (text.len() / n).max(1);
+    let mut chunks = Vec::new();
+    let mut start  = 0;
+    while start < text.len() {
+        let mut end = (start + chunk_size).min(text.len());
+        // Extend to next whitespace to avoid cutting mid-word
+        while end < text.len() && !text.as_bytes()[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        chunks.push(&text[start..end]);
+        start = end;
+    }
+    chunks
 }
 
 fn encode(mode: &str, output: &str) {
-    let encoder = Arc::new(BPEEncoder::load("tokenizer.json"));
+    let encoder   = Arc::new(BPEEncoder::load("tokenizer.json"));
+    let n_threads = rayon::current_num_threads();
 
     let (dir, add_bos_eos) = match mode {
         "pretrain" => (FRENCH_DIR, false),
@@ -359,62 +395,47 @@ fn encode(mode: &str, output: &str) {
         .sum();
 
     println!("\nEncoding {} corpus ===> {} ({} files, {:.2} GB) on {} threads",
-        mode, output, all_files.len(), total_bytes as f64 / 1e9,
-        rayon::current_num_threads());
+        mode, output, all_files.len(), total_bytes as f64 / 1e9, n_threads);
 
-    let t0              = Instant::now();
-    let bytes_done      = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let tokens_done     = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let print_every     : u64 = 1_000_000; // every 1MB
-    let next_print      = Arc::new(std::sync::atomic::AtomicU64::new(print_every));
+    let t0         = Instant::now();
+    let bytes_done = Arc::new(AtomicU64::new(0));
+    let print_every: u64 = 1_000_000; // every 1MB
+    let next_print = Arc::new(AtomicU64::new(print_every));
 
-    // Encode all files in parallel, each returns (index, ids)
-    let results: Vec<(usize, Vec<u16>)> = all_files
-        .par_iter()
-        .enumerate()
-        .map(|(i, path)| {
-            let text = fs::read_to_string(path).unwrap_or_default();
-            let file_bytes = text.len() as u64;
-            let enc  = Arc::clone(&encoder);
-            let bd   = Arc::clone(&bytes_done);
-            let td   = Arc::clone(&tokens_done);
-            let np   = Arc::clone(&next_print);
+    let out_file   = fs::File::create(output).expect("Cannot create output file");
+    let mut writer = BufWriter::new(out_file);
+    let mut total_tokens: u64 = 0;
 
-            // Encode char by char for accurate progress
-            let mut ids: Vec<u16> = Vec::new();
-            if add_bos_eos { ids.push(BOS_ID); }
-            let mut cur_word = String::new();
-            let mut local_bytes: u64 = 0;
+    for path in &all_files {
+        let text = match fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => { eprintln!("Warning: {:?}: {}", path, e); continue; }
+        };
 
-            for c in text.chars() {
-                let lc = c.to_lowercase().next().unwrap_or(c);
-                local_bytes += c.len_utf8() as u64;
+        // Split into n_threads chunks at word boundaries
+        let chunks = split_into_chunks(&text, n_threads);
 
-                if is_french_char(lc) {
-                    cur_word.push(lc);
-                } else {
-                    if !cur_word.is_empty() {
-                        ids.extend(enc.tokenize_word(&cur_word));
-                        cur_word.clear();
-                    }
-                    if !c.is_whitespace() {
-                        ids.push(*enc.vocab.get(&c.to_string()).unwrap_or(&UNK_ID));
-                    }
-                }
+        let bd = Arc::clone(&bytes_done);
+        let np = Arc::clone(&next_print);
 
-                // Update shared counters every 1MB of local work
-                if local_bytes % 1_000_000 == 0 {
-                    let total_done = bd.fetch_add(1_000_000, std::sync::atomic::Ordering::Relaxed) + 1_000_000;
-                    td.store(ids.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        // Encode chunks in parallel
+        let chunk_ids: Vec<Vec<u16>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let enc        = Arc::clone(&encoder);
+                let chunk_bytes = chunk.len() as u64;
+                let ids        = enc.encode_chunk(chunk);
 
-                    let threshold = np.load(std::sync::atomic::Ordering::Relaxed);
-                    if total_done >= threshold {
-                        np.fetch_add(print_every, std::sync::atomic::Ordering::Relaxed);
+                // Update global byte counter
+                let total_done = bd.fetch_add(chunk_bytes, Ordering::Relaxed) + chunk_bytes;
+                let threshold  = np.load(Ordering::Relaxed);
+                if total_done >= threshold {
+                    if np.compare_exchange(threshold, threshold + print_every,
+                        Ordering::Relaxed, Ordering::Relaxed).is_ok() {
                         let pct       = total_done * 100 / total_bytes.max(1);
                         let elapsed   = t0.elapsed().as_secs_f64();
-                        let remaining = if total_done > 0 {
-                            elapsed / total_done as f64 * (total_bytes - total_done.min(total_bytes)) as f64
-                        } else { 0.0 };
+                        let remaining = elapsed / total_done as f64
+                            * total_bytes.saturating_sub(total_done) as f64;
                         eprintln!("  [{:3}%] {:.2}/{:.2} GB ===> {}m{}s remaining ===> {} words cached",
                             pct,
                             total_done as f64 / 1e9,
@@ -425,33 +446,24 @@ fn encode(mode: &str, output: &str) {
                         );
                     }
                 }
-            }
-            if !cur_word.is_empty() {
-                ids.extend(enc.tokenize_word(&cur_word));
-            }
-            if add_bos_eos { ids.push(EOS_ID); }
+                ids
+            })
+            .collect();
 
-            // Final update for remaining bytes
-            let rem = file_bytes - (local_bytes / 1_000_000) * 1_000_000;
-            bd.fetch_add(rem, std::sync::atomic::Ordering::Relaxed);
-
-            (i, ids)
-        })
-        .collect();
-
-    // Sort by original file order and write sequentially
-    let mut sorted = results;
-    sorted.sort_by_key(|(i, _)| *i);
-
-    let out_file   = fs::File::create(output).expect("Cannot create output file");
-    let mut writer = BufWriter::new(out_file);
-    let mut total_tokens: u64 = 0;
-
-    for (_, ids) in &sorted {
-        for id in ids {
-            writer.write_all(&id.to_le_bytes()).unwrap();
+        if add_bos_eos {
+            writer.write_all(&BOS_ID.to_le_bytes()).unwrap();
+            total_tokens += 1;
         }
-        total_tokens += ids.len() as u64;
+        for ids in &chunk_ids {
+            for id in ids {
+                writer.write_all(&id.to_le_bytes()).unwrap();
+            }
+            total_tokens += ids.len() as u64;
+        }
+        if add_bos_eos {
+            writer.write_all(&EOS_ID.to_le_bytes()).unwrap();
+            total_tokens += 1;
+        }
     }
 
     println!("\nEncoding done ===> {}M tokens in {:.1}s ===> {}",
