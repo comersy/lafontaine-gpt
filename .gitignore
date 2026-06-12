@@ -11,3 +11,6 @@ Data - French/Gutenberg/gutenberg_fr.txt
 *.d
 *.exe
 *.bin
+bpe_tokenizer/target/
+*.rlib
+*.lock

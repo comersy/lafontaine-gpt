@@ -1,0 +1,15 @@
+[package]
+name    = "bpe_tokenizer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tokenizer_train"
+path = "src/main.rs"
+
+[dependencies]
+rayon    = "1.10"
+dashmap  = "6.1"
+
+[profile.release]
+opt-level = 3
