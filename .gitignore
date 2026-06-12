@@ -5,6 +5,7 @@ training_log.json
 pretrain_log.json
 finetune_log.json
 Data - French/Wikipedia/wikipedia_fr.txt
+Data - French/Gutenberg/gutenberg_fr.txt
 *.o
 *.rcgu.o
 *.d
