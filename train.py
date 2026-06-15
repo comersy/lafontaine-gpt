@@ -8,6 +8,10 @@ Two phases:
 Usage:
     python train.py --phase pretrain
     python train.py --phase finetune
+
+Resuming: if a checkpoint exists for the current phase, training resumes
+automatically from where it left off — as if max_iters had been higher
+from the start.
 """
 
 import os
@@ -16,7 +20,6 @@ import math
 import time
 import argparse
 import torch
-from torch.utils.data import DataLoader
 
 from tokenizer import BPETokenizer
 from dataset   import build_loaders, BLOCK_SIZE, BATCH_SIZE
@@ -30,7 +33,7 @@ PRETRAIN_CONFIG = {
     "n_head"     : 8,
     "n_embd"     : 512,
     "dropout"    : 0.1,
-    "max_iters"  : 50000,
+    "max_iters"  : 60000,
     "lr"         : 3e-4,
     "min_lr"     : 3e-5,
     "warmup"     : 2000,
@@ -86,14 +89,15 @@ def estimate_loss(model, train_loader, val_loader, eval_iters):
     losses = {}
     for split, loader in [("train", train_loader), ("val", val_loader)]:
         total = 0.0
+        count = 0
         for i, (x, y) in enumerate(loader):
             if i >= eval_iters:
                 break
             x, y = x.to(DEVICE), y.to(DEVICE)
             _, loss = model(x, targets=y)
             total += loss.item()
-        count = max(1, min(eval_iters, i))
-        losses[split] = total / count
+            count += 1
+        losses[split] = total / max(1, count)
     model.train()
     return losses
 
@@ -126,49 +130,69 @@ def train(phase):
 
     model = GPT(model_cfg).to(DEVICE)
 
-    if phase == "finetune":
-        pretrain_path = PRETRAIN_CONFIG["checkpoint"]
-        if os.path.exists(pretrain_path):
-            print(f"Loading pretrain checkpoint ===> {pretrain_path}")
-            torch.serialization.add_safe_globals([GPTConfig])
-            ckpt = torch.load(pretrain_path, map_location=DEVICE, weights_only=False)
-            model.load_state_dict(ckpt["model_state"])
-            print(f"  Loaded ===> iter {ckpt['iter']}, val loss {ckpt['val_loss']:.4f}\n")
-        else:
-            print(f"Warning: no pretrain checkpoint found, finetuning from scratch.\n")
-
     for module in model.modules():
         if isinstance(module, torch.nn.Dropout):
             module.p = cfg["dropout"]
 
-    print(f"Device ===> {DEVICE}")
-    print(f"Phase  ===> {phase}")
-    print(f"Params ===> {sum(p.numel() for p in model.parameters()):,}\n")
-
     decay_params   = [p for n, p in model.named_parameters() if p.dim() >= 2]
     nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2]
-
     optimizer = torch.optim.AdamW([
         {"params": decay_params,   "weight_decay": 1e-2},
         {"params": nodecay_params, "weight_decay": 0.0},
     ], lr=cfg["lr"])
 
+    # ── Checkpoint / resume logic ─────────────────────────────────────────────
+
+    start_iter    = 0
     best_val_loss = float("inf")
-    train_iter    = iter(train_loader)
-    t_start       = time.time()
 
-    log = {
-        "phase"         : phase,
-        "config"        : {**cfg, "vocab_size": len(tokenizer)},
-        "evals"         : [],
-        "best_val_loss" : None,
-        "best_iter"     : None,
-        "total_time_sec": None,
-    }
+    # Pretrain: load existing log to continue. Finetune: always fresh log.
+    if phase == "pretrain" and os.path.exists(cfg["log_file"]):
+        with open(cfg["log_file"], "r") as f:
+            log = json.load(f)
+        best_val_loss = log.get("best_val_loss") or float("inf")
+    else:
+        log = {
+            "phase"         : phase,
+            "config"        : {**cfg, "vocab_size": len(tokenizer)},
+            "evals"         : [],
+            "best_val_loss" : None,
+            "best_iter"     : None,
+            "total_time_sec": 0,
+        }
 
-    print(f"Starting {phase} ===> {cfg['max_iters']} iterations\n")
+    if phase == "pretrain":
+        if os.path.exists(cfg["checkpoint"]):
+            print(f"Resuming pretrain ===> {cfg['checkpoint']}")
+            torch.serialization.add_safe_globals([GPTConfig])
+            ckpt = torch.load(cfg["checkpoint"], map_location=DEVICE, weights_only=False)
+            model.load_state_dict(ckpt["model_state"])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            start_iter = ckpt["iter"] + 1
+            print(f"  Resumed ===> iter {start_iter}, val loss {ckpt['val_loss']:.4f}\n")
 
-    for it in range(cfg["max_iters"]):
+    elif phase == "finetune":
+        if os.path.exists(PRETRAIN_CONFIG["checkpoint"]):
+            print(f"Loading pretrain checkpoint ===> {PRETRAIN_CONFIG['checkpoint']}")
+            torch.serialization.add_safe_globals([GPTConfig])
+            ckpt = torch.load(PRETRAIN_CONFIG["checkpoint"], map_location=DEVICE, weights_only=False)
+            model.load_state_dict(ckpt["model_state"])
+            print(f"  Loaded ===> iter {ckpt['iter']}, val loss {ckpt['val_loss']:.4f}\n")
+        else:
+            print("Warning: no pretrain checkpoint found, finetuning from scratch.\n")
+
+    # ── Run ───────────────────────────────────────────────────────────────────
+
+    print(f"Device ===> {DEVICE}")
+    print(f"Phase  ===> {phase}")
+    print(f"Params ===> {sum(p.numel() for p in model.parameters()):,}\n")
+    print(f"Starting {phase} ===> iter {start_iter} to {cfg['max_iters']}\n")
+
+    train_iter   = iter(train_loader)
+    t_start      = time.time()
+    elapsed_base = log.get("total_time_sec") or 0  # preserve time from previous runs
+
+    for it in range(start_iter, cfg["max_iters"]):
 
         lr = get_lr(it, cfg)
         for group in optimizer.param_groups:
@@ -190,7 +214,7 @@ def train(phase):
 
         if it % cfg["eval_every"] == 0 or it == cfg["max_iters"] - 1:
             losses  = estimate_loss(model, train_loader, val_loader, cfg["eval_iters"])
-            elapsed = time.time() - t_start
+            elapsed = elapsed_base + time.time() - t_start
 
             print(
                 f"[{phase} | iter {it:6d}] "
@@ -220,7 +244,7 @@ def train(phase):
                 }, cfg["checkpoint"])
                 print(f"  Checkpoint saved ===> {cfg['checkpoint']} (val loss: {best_val_loss:.4f})\n")
 
-            log["total_time_sec"] = round(time.time() - t_start, 1)
+            log["total_time_sec"] = round(elapsed, 1)
             with open(cfg["log_file"], "w") as f:
                 json.dump(log, f, indent=2)
 
