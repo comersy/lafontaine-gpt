@@ -43,15 +43,15 @@ PRETRAIN_CONFIG = {
 }
 
 FINETUNE_CONFIG = {
-    "n_layer"    : 6,
-    "n_head"     : 6,
-    "n_embd"     : 384,
+    "n_layer"    : 8,
+    "n_head"     : 8,
+    "n_embd"     : 512,
     "dropout"    : 0.3,
     "max_iters"  : 3000,
     "lr"         : 5e-5,
     "min_lr"     : 1e-5,
     "warmup"     : 200,
-    "batch_size" : 32,
+    "batch_size" : 16,
     "block_size" : BLOCK_SIZE,
     "eval_every" : 100,
     "eval_iters" : 50,
@@ -92,7 +92,8 @@ def estimate_loss(model, train_loader, val_loader, eval_iters):
             x, y = x.to(DEVICE), y.to(DEVICE)
             _, loss = model(x, targets=y)
             total += loss.item()
-        losses[split] = total / min(eval_iters, len(loader))
+        count = max(1, min(eval_iters, i))
+        losses[split] = total / count
     model.train()
     return losses
 
