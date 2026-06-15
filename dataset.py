@@ -22,7 +22,7 @@ from tokenizer import BPETokenizer
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
-BLOCK_SIZE  = 256
+BLOCK_SIZE  = 512
 BATCH_SIZE  = 32
 TRAIN_SPLIT = 0.9
 
