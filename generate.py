@@ -15,7 +15,7 @@ from model     import GPT, GPTConfig
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-CHECKPOINT_PATH = os.path.join("checkpoints", "finetune.pt")
+CHECKPOINT_PATH = os.path.join("checkpoints", "pretrain.pt")
 MAX_NEW_TOKENS  = 300
 TEMPERATURE     = 0.8
 TOP_K           = 40
