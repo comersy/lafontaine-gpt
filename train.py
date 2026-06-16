@@ -33,7 +33,7 @@ PRETRAIN_CONFIG = {
     "n_head"     : 8,
     "n_embd"     : 512,
     "dropout"    : 0.1,
-    "max_iters"  : 80000,
+    "max_iters"  : 100000,
     "lr"         : 3e-4,
     "min_lr"     : 3e-5,
     "warmup"     : 2000,
@@ -46,20 +46,21 @@ PRETRAIN_CONFIG = {
 }
 
 FINETUNE_CONFIG = {
-    "n_layer"    : 8,
-    "n_head"     : 8,
-    "n_embd"     : 512,
-    "dropout"    : 0.4,
-    "max_iters"  : 3000,
-    "lr"         : 5e-5,
-    "min_lr"     : 1e-5,
-    "warmup"     : 200,
-    "batch_size" : 16,
-    "block_size" : BLOCK_SIZE,
-    "eval_every" : 100,
-    "eval_iters" : 50,
-    "checkpoint" : "checkpoints/finetune.pt",
-    "log_file"   : "finetune_log.json",
+    "n_layer"      : 8,
+    "n_head"       : 8,
+    "n_embd"       : 512,
+    "dropout"      : 0.3,
+    "max_iters"    : 3000,
+    "lr"           : 2e-5,
+    "min_lr"       : 1e-5,
+    "warmup"       : 200,
+    "batch_size"   : 16,
+    "block_size"   : BLOCK_SIZE,
+    "eval_every"   : 100,
+    "eval_iters"   : 50,
+    "freeze_layers": 0,  # number of first transformer blocks to freeze (0 = none)
+    "checkpoint"   : "checkpoints/finetune.pt",
+    "log_file"     : "finetune_log.json",
 }
 
 DEVICE = (
@@ -134,14 +135,7 @@ def train(phase):
         if isinstance(module, torch.nn.Dropout):
             module.p = cfg["dropout"]
 
-    decay_params   = [p for n, p in model.named_parameters() if p.dim() >= 2]
-    nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2]
-    optimizer = torch.optim.AdamW([
-        {"params": decay_params,   "weight_decay": 1e-2},
-        {"params": nodecay_params, "weight_decay": 0.0},
-    ], lr=cfg["lr"])
-
-    # ── Checkpoint / resume logic ─────────────────────────────────────────────
+    # ── Checkpoint loading (before optimizer, so freezing applies cleanly) ────
 
     start_iter    = 0
     best_val_loss = float("inf")
@@ -167,7 +161,6 @@ def train(phase):
             torch.serialization.add_safe_globals([GPTConfig])
             ckpt = torch.load(cfg["checkpoint"], map_location=DEVICE, weights_only=False)
             model.load_state_dict(ckpt["model_state"])
-            optimizer.load_state_dict(ckpt["optimizer"])
             start_iter = ckpt["iter"] + 1
             print(f"  Resumed ===> iter {start_iter}, val loss {ckpt['val_loss']:.4f}\n")
 
@@ -180,6 +173,37 @@ def train(phase):
             print(f"  Loaded ===> iter {ckpt['iter']}, val loss {ckpt['val_loss']:.4f}\n")
         else:
             print("Warning: no pretrain checkpoint found, finetuning from scratch.\n")
+
+    # ── Layer freezing (finetune only) ─────────────────────────────────────────
+    # Freezes the first `freeze_layers` transformer blocks so only the later
+    # blocks + final layer norm + head are updated during finetuning. This
+    # reduces the number of trainable parameters, which helps prevent
+    # overfitting when the finetune dataset is small.
+
+    n_frozen = cfg.get("freeze_layers", 0) if phase == "finetune" else 0
+    if n_frozen > 0:
+        n_frozen = min(n_frozen, cfg["n_layer"])
+        for i, block in enumerate(model.transformer["blocks"]):
+            if i < n_frozen:
+                for param in block.parameters():
+                    param.requires_grad = False
+        n_total     = sum(p.numel() for p in model.parameters())
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Frozen first {n_frozen}/{cfg['n_layer']} layers ===> "
+              f"{n_trainable:,} / {n_total:,} trainable params\n")
+
+    # ── Optimizer (built after freezing, only includes trainable params) ──────
+
+    decay_params   = [p for n, p in model.named_parameters() if p.dim() >= 2 and p.requires_grad]
+    nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2 and p.requires_grad]
+    optimizer = torch.optim.AdamW([
+        {"params": decay_params,   "weight_decay": 1e-2},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ], lr=cfg["lr"])
+
+    # Resume optimizer state for pretrain (after optimizer creation)
+    if phase == "pretrain" and os.path.exists(cfg["checkpoint"]) and "ckpt" in dir() and "optimizer" in ckpt:
+        optimizer.load_state_dict(ckpt["optimizer"])
 
     # ── Run ───────────────────────────────────────────────────────────────────
 
