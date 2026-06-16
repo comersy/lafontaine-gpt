@@ -49,7 +49,7 @@ FINETUNE_CONFIG = {
     "n_layer"    : 8,
     "n_head"     : 8,
     "n_embd"     : 512,
-    "dropout"    : 0.3,
+    "dropout"    : 0.4,
     "max_iters"  : 3000,
     "lr"         : 5e-5,
     "min_lr"     : 1e-5,
