@@ -33,7 +33,7 @@ PRETRAIN_CONFIG = {
     "n_head"     : 8,
     "n_embd"     : 512,
     "dropout"    : 0.1,
-    "max_iters"  : 300000,
+    "max_iters"  : 600000,
     "lr"         : 3e-4,
     "min_lr"     : 3e-5,
     "warmup"     : 2000,
