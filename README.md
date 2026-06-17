@@ -92,6 +92,28 @@ With only ~95k tokens of finetuning data and a 41M-parameter model, overfitting 
 
 ---
 
+## Current generation quality
+
+Not there yet, but improving. Recent samples from the finetuned checkpoint already show recognizable La Fontaine vocabulary and structure (classical spelling, animal characters, moral framing) but still suffer from repetition loops and occasional word fragmentation from the tokenizer.
+
+Sample (prompt: "Le lion"):
+
+```
+le lion pour moi est un chien qui se plaît à la chasse il est sage et sage je le
+crois mais il ne faut pas qu'on le sache je crois que la chasse de cette espèce
+est plus douce que la nôtre [...] il étoit bon de ne pas faire il avoit fait son
+métier et il avoit fait son métier il étoit beau il avoit fait son métier [...]
+```
+
+Classical syntax and tone are there early on, but the model falls into a repetition loop after a few dozen tokens — a common failure mode when the model loses track of context.
+
+Next steps:
+- repetition penalty during sampling, to break out of these loops
+- add punctuation as base vocabulary tokens (the current tokenizer drops most punctuation, which likely contributes to run-on, comma-less generations)
+- close the finetuning data gap (95k tokens vs 41M parameters) without diluting the La Fontaine-only style
+
+---
+
 ## Project structure
 
 ```
