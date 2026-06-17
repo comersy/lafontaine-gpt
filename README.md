@@ -14,7 +14,16 @@ The goal is simple: generate new fables in the style of Jean de La Fontaine.
 
 ## Starting point: fables only
 
-The obvious first attempt was to train directly on the 242 fables (~95k tokens). A transformer has to learn everything at once from that — French grammar, syntax, vocabulary, narrative structure, poetic style — which is too much to ask from too little data. The model produced recognizable words and characters (loup, renard, lion) but no coherent sentence structure.
+The obvious first attempt was to train directly on the 242 fables (~95k tokens). A transformer has to learn everything at once from that — French grammar, syntax, vocabulary, narrative structure, poetic style — which is too much to ask from too little data.
+
+Best result from that attempt:
+
+```
+le loup, dit- t'en ne sommes, l'elle en peut- vous me suis point de moi?
+le jour par leur plus fait le plus que- nous vous vous ne n'ai de les biens
+```
+
+Recognizable characters (loup, renard, lion), zero coherent sentence structure.
 
 The fix is the standard one used by real LLMs: pretrain on a large general corpus first, then finetune on the target domain.
 
