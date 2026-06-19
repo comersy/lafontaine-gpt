@@ -6,7 +6,7 @@ A language model built from scratch to generate La Fontaine fables in classical 
 
 ## What this project is
 
-A GPT-style transformer trained entirely from scratch — no pretrained weights, no external embeddings, no shortcuts. Just PyTorch, math, and La Fontaine.
+A GPT-style transformer trained entirely from scratch 
 
 The goal is simple: generate new fables in the style of Jean de La Fontaine.
 
